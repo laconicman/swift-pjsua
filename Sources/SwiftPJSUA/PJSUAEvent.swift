@@ -1,57 +1,25 @@
 import PJSIP
 
-/// Opaque, type-safe handle for a PJSUA call (wraps `pjsua_call_id`, an `Int32`).
-public struct CallID: Hashable, Sendable, CustomStringConvertible {
-    public let raw: pjsua_call_id
-    init(_ raw: pjsua_call_id) { self.raw = raw }
-    public var description: String { "call#\(raw)" }
-}
-
-/// Opaque, type-safe handle for a PJSUA account (wraps `pjsua_acc_id`, an `Int32`).
-public struct AccountID: Hashable, Sendable, CustomStringConvertible {
-    public let raw: pjsua_acc_id
-    init(_ raw: pjsua_acc_id) { self.raw = raw }
-    public var description: String { "acc#\(raw)" }
-}
-
-/// SIP transport to create. Maps to PJSIP's `pjsip_transport_type_e`.
-public enum Transport: Sendable {
-    case udp, tcp, tls
-    var pjType: pjsip_transport_type_e {
-        switch self {
-        case .udp: return PJSIP_TRANSPORT_UDP
-        case .tcp: return PJSIP_TRANSPORT_TCP
-        case .tls: return PJSIP_TRANSPORT_TLS
-        }
-    }
-}
-
-/// The INVITE-session lifecycle, mirrored from `pjsip_inv_state` so callers don't
-/// import the C enum. The raw value of `pjsip_call_make_call` tells you the INVITE was
-/// *sent*; the real lifecycle arrives as these states via `PJSUA.events`.
-public enum CallState: Sendable {
-    case null, calling, incoming, early, connecting, confirmed, disconnected, unknown(Int32)
-
-    init(_ s: pjsip_inv_state) {
-        switch s {
-        case PJSIP_INV_STATE_NULL:       self = .null
-        case PJSIP_INV_STATE_CALLING:    self = .calling
-        case PJSIP_INV_STATE_INCOMING:   self = .incoming
-        case PJSIP_INV_STATE_EARLY:      self = .early
-        case PJSIP_INV_STATE_CONNECTING: self = .connecting
-        case PJSIP_INV_STATE_CONFIRMED:  self = .confirmed
-        case PJSIP_INV_STATE_DISCONNECTED: self = .disconnected
-        default: self = .unknown(s.rawValue)
-        }
-    }
-}
-
-/// Events surfaced from PJSUA's internal worker-thread callbacks, delivered to the
-/// app via `PJSUA.events` (an `AsyncStream`). This is the clean boundary: the C
-/// callbacks translate to POD `Sendable` values and never touch app/UI state directly.
+/// Events surfaced from PJSUA's internal worker-thread callbacks, delivered to the app via
+/// ``PJSUA/events`` (an `AsyncStream`). This is the clean boundary: the C callbacks
+/// translate to plain `Sendable` values and never touch app/UI state directly.
+///
+/// Several cases carry the SIP `Call-ID` (`sipCallID`). The GUI layer needs it to compute
+/// a stable CallKit UUID so a VoIP push and the matching INVITE over a persisted
+/// connection resolve to the *same* call (no double ring). See `SwiftPJSUAKit`.
 public enum PJSUAEvent: Sendable {
-    case registrationState(AccountID, active: Bool, statusCode: Int32)
-    case incomingCall(AccountID, CallID)
-    case callState(CallID, CallState)
-    case callMediaActive(CallID)
+    /// Registration state changed. `statusCode` is the SIP status (e.g. 200, 401, 403),
+    /// `expiration` the next re-registration interval in seconds (0 when unregistered).
+    case registrationState(account: AccountID, active: Bool, statusCode: Int32, expiration: UInt32)
+
+    /// A new inbound INVITE arrived. `sipCallID` is the SIP `Call-ID` header value.
+    case incomingCall(account: AccountID, call: CallID, sipCallID: String?)
+
+    /// The INVITE-session state changed. `lastStatus` is the SIP status of the last event
+    /// on the call (e.g. 487 when the caller CANCELs before answer, 200 on success);
+    /// `sipCallID` is the SIP `Call-ID` header value.
+    case callState(call: CallID, state: CallState, sipCallID: String?, lastStatus: Int32)
+
+    /// Call media became active; audio can be connected to the sound device.
+    case callMediaActive(call: CallID)
 }

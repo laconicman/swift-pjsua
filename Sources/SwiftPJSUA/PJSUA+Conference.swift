@@ -77,7 +77,8 @@ extension PJSUA {
         var info = pjsua_call_info()
         guard pjsua_call_get_info(call.raw, &info).isSuccess else { return false }
         guard let contact = info.remote_contact.string else { return false }
-        // RFC 4579: the parameter is `;isfocus` (token, case-insensitive, value-less).
-        return contact.lowercased().contains("isfocus")
+        // RFC 4579: the parameter is `;isfocus` (token, case-insensitive, value-less). Anchor on the
+        // leading `;` so a Contact like `sip:isfocusadmin@host` or `;notisfocus` doesn't false-match.
+        return contact.lowercased().contains(";isfocus")
     }
 }

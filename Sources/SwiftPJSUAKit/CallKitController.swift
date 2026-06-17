@@ -41,9 +41,12 @@ public final class CallKitController: NSObject, CXProviderDelegate {
     public static func defaultConfiguration() -> CXProviderConfiguration {
         let configuration = CXProviderConfiguration()
         // Shape the full video surface from the start (design D-VIDEO); pixel rendering lands in the
-        // Offhook app. Grouping/conferences (maximumCallsPerCallGroup > 1) follow in PR-b.
+        // Offhook app.
         configuration.supportsVideo = true
-        configuration.maximumCallsPerCallGroup = 1
+        // Allow local conferences: CallKit shows merge/split UI and routes CXSetGroupCallAction,
+        // mapped to the engine conference bridge (design §7.1). The ceiling is the local-mix
+        // participant cap; apps may tune it.
+        configuration.maximumCallsPerCallGroup = 5
         configuration.supportedHandleTypes = [.generic]
         return configuration
     }
@@ -94,6 +97,10 @@ public final class CallKitController: NSObject, CXProviderDelegate {
 
     public func provider(_ provider: CXProvider, perform action: CXPlayDTMFCallAction) {
         Task { await router.playDTMF(action) }
+    }
+
+    public func provider(_ provider: CXProvider, perform action: CXSetGroupCallAction) {
+        Task { await router.setGroup(action) }
     }
 
     // MARK: CXProviderDelegate — audio session lifecycle

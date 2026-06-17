@@ -43,6 +43,16 @@ public actor CallSessionRouter {
 
     private var consumer: Task<Void, Never>?
 
+    /// Periodic TTL sweep of orphaned *pending* registry entries — a VoIP push reported a call
+    /// whose INVITE never arrived. Withdraws the stale ringing CallKit report (see
+    /// ``CallRegistry/sweepExpired(olderThan:)``). Runs for the process lifetime alongside
+    /// `consumer`.
+    private var sweeper: Task<Void, Never>?
+
+    /// Cadence of the pending-entry sweep. Several of these fit inside `defaultPendingTTL` so an
+    /// orphaned push is withdrawn within roughly one TTL of arriving.
+    private static let sweepInterval: Duration = .seconds(15)
+
     public init(engine: PJSUA, provider: CXProvider, registry: CallRegistry = CallRegistry()) {
         self.engine = engine
         self.provider = provider
@@ -57,6 +67,12 @@ public actor CallSessionRouter {
         consumer = Task { [weak self] in
             for await event in stream {
                 await self?.handle(event)
+            }
+        }
+        sweeper = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: CallSessionRouter.sweepInterval)
+                await self?.sweepExpiredPending()
             }
         }
     }
@@ -268,6 +284,19 @@ public actor CallSessionRouter {
     private func bind(call: CallID, to uuid: UUID) async {
         uuidByCall[call] = uuid
         await registry.firstSeen(uuid: uuid, call: call)
+    }
+
+    /// Reap pending registry entries whose INVITE never arrived and withdraw their still-ringing
+    /// CallKit reports. Bound (live) calls are untouched — they end via `.disconnected` /
+    /// `CXEndCallAction`.
+    private func sweepExpiredPending() async {
+        let expired = await registry.sweepExpired()
+        for uuid in expired {
+            // The reported push never produced an INVITE; dismiss the system call UI.
+            provider.reportCall(with: uuid, endedAt: nil, reason: .unanswered)
+            pending[uuid] = nil
+            locallyEnded.remove(uuid)
+        }
     }
 
     private func evict(uuid: UUID) async {

@@ -5,11 +5,15 @@ import XCTest
 // target only builds/runs on the iOS Simulator:
 //   xcodebuild test -scheme swift-pjsua -destination 'platform=iOS Simulator,name=iPhone 15'
 final class CallIdentityTests: XCTestCase {
-    // RFC 4122 worked example: UUIDv5(DNS namespace, "www.example.com").
+    // RFC 4122 / RFC 9562 worked example: UUIDv5(DNS namespace, "www.example.com").
+    // The authoritative answer is 2ed6657d-e927-568b-95e1-2665a8aea6a2 — verified with
+    // Python `uuid.uuid5(uuid.NAMESPACE_DNS, "www.example.com")` and a by-hand SHA-1 of the
+    // namespace bytes + name. (An earlier literal ended ...ff66 and an autoreview suggestion
+    // ...a1f2; both are wrong — the correct suffix is ...a6a2.)
     func testVersion5MatchesRFC4122KnownAnswer() {
         let dns = UUID(uuidString: "6ba7b810-9dad-11d1-80b4-00c04fd430c8")!
         let derived = UUID(version5: "www.example.com", namespace: dns)
-        XCTAssertEqual(derived.uuidString.lowercased(), "2ed6657d-e927-568b-95e1-2665a8aeff66")
+        XCTAssertEqual(derived.uuidString.lowercased(), "2ed6657d-e927-568b-95e1-2665a8aea6a2")
     }
 
     func testVersion5IsDeterministicAndDistinct() {

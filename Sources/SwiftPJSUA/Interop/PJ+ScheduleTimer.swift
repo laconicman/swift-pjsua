@@ -1,8 +1,9 @@
 import PJSIP
 
-// Optional convenience, not used by the actor — kept because it's a clean idea worth
-// having around if you ever schedule one-off work onto PJSUA's timer thread from a
-// non-actor context.
+// Optional convenience, not used by the actor — kept as a documented escape hatch for
+// the rare case of scheduling one-off work onto PJSUA's timer thread from a non-actor C
+// context. The actor's `SerialExecutor` is the production mechanism for getting onto the
+// PJSIP thread; this is deliberately low-level (no ordering / cancellation guarantees).
 //
 // When PJ_TIMER_DEBUG=1 (PJSIP's default), the C macro `pjsua_schedule_timer2` expands
 // to `pjsua_schedule_timer2_dbg(..., __FILE__, __LINE__)`. C macros don't import into
@@ -11,7 +12,6 @@ import PJSIP
 // Swift with `#fileID`/`#line` as **default arguments**, which capture the *call site*
 // exactly like the C macros do. Call sites stay clean: `pjsua_schedule_timer2(cb, ud, 0)`
 // and PJLIB's timer debug log shows `MyFile.swift:42`.
-
 @discardableResult
 public func pjsua_schedule_timer2(
     _ callback: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void,

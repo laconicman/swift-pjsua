@@ -17,6 +17,10 @@ import PJSIP
 ///      because this thread is dedicated to PJSIP. It would be a bug on the cooperative
 ///      pool, which forbids blocking (it breaks Swift's forward-progress guarantee).
 ///
+/// This executor thread never calls `pjsua_handle_events`. PJSUA's own worker threads
+/// (`thread_cnt >= 1`, pinned in ``PJSUA/start(_:)``) pump events and fire the callbacks;
+/// this thread exists solely to *enter* PJSIP calls serially. See `PJSUACallbacks.swift`.
+///
 /// Availability: custom executors (SE-0392) need the Swift 5.9 runtime → iOS 17+.
 final class PJSIPExecutor: SerialExecutor, @unchecked Sendable {
     // @unchecked Sendable invariant: the only mutable state is `queue`/`stopping`, both

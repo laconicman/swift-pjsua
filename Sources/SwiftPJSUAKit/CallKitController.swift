@@ -3,38 +3,55 @@ import CallKit
 import Foundation
 import SwiftPJSUA
 
-/// Bridges CallKit to the ``PJSUA`` engine.
+/// The `CXProviderDelegate` that bridges CallKit to the ``PJSUA`` engine.
 ///
-/// - Important: **Skeleton.** This iteration wires the one piece needed for audio to flow —
-///   the CallKit audio-session lifecycle drives the engine's sound-device API — plus a
-///   deduplicated incoming-call report. CXAction handling (answer/end/hold/mute/DTMF) and
-///   full provider configuration are intentionally deferred to the next iteration.
+/// This type is intentionally **thin**: it owns the `CXProvider`, starts the
+/// ``CallSessionRouter``, and forwards every `CXAction` and audio-session callback into it.
+/// All correlation logic (which engine event fulfills which action, dedup, registry ownership)
+/// lives in the router — the single consumer of ``PJSUA/events`` (design **D-ROUTER**).
+/// ``VoIPPushHandler`` reports incoming pushes through ``reportIncomingCall(serverUUID:sipCallID:handle:hasVideo:)``.
+///
+/// - SeeAlso: `CXProviderDelegate`
+///   (<https://developer.apple.com/documentation/callkit/cxproviderdelegate>),
+///   Making and receiving VoIP calls
+///   (<https://developer.apple.com/documentation/callkit/making-and-receiving-voip-calls>).
 public final class CallKitController: NSObject, CXProviderDelegate {
     private let provider: CXProvider
     private let engine: PJSUA
-    private let registry: CallRegistry
+
+    /// The single engine-event consumer and CallKit/SIP correlation hub. Exposed so the app can
+    /// set the outgoing account (``CallSessionRouter/setOutgoingAccount(_:)``) and so
+    /// ``VoIPPushHandler`` can reach it.
+    public let router: CallSessionRouter
 
     public init(engine: PJSUA,
                 registry: CallRegistry = CallRegistry(),
                 configuration: CXProviderConfiguration = CallKitController.defaultConfiguration()) {
         self.engine = engine
-        self.registry = registry
-        self.provider = CXProvider(configuration: configuration)
+        let provider = CXProvider(configuration: configuration)
+        self.provider = provider
+        // CXProvider is not Sendable, but Apple documents its report methods as thread-safe, so the
+        // actor may issue reports on it. It is created here and handed to the router once.
+        self.router = CallSessionRouter(engine: engine, provider: provider, registry: registry)
         super.init()
         provider.setDelegate(self, queue: nil)
+        Task { await router.start() }
     }
 
     public static func defaultConfiguration() -> CXProviderConfiguration {
         let configuration = CXProviderConfiguration()
-        configuration.supportsVideo = false
+        // Shape the full video surface from the start (design D-VIDEO); pixel rendering lands in the
+        // Offhook app. Grouping/conferences (maximumCallsPerCallGroup > 1) follow in PR-b.
+        configuration.supportsVideo = true
         configuration.maximumCallsPerCallGroup = 1
         configuration.supportedHandleTypes = [.generic]
         return configuration
     }
 
-    /// Report a new incoming call to CallKit, deduplicated via ``CallIdentity``. If the call
-    /// (same server UUID or same SIP `Call-ID`) was already reported, this is a no-op and
-    /// returns the existing UUID.
+    /// Report a new incoming call to CallKit, deduplicated via ``CallIdentity`` / ``CallRegistry``
+    /// inside the router. If the call (same server UUID or same SIP `Call-ID`) was already reported
+    /// — e.g. the VoIP push and the socket INVITE both arrive — this is a no-op and returns the
+    /// existing UUID, so the user sees a single ring (design §9).
     ///
     /// - Returns: the CallKit UUID used for this call (stable across push and INVITE).
     @discardableResult
@@ -42,23 +59,44 @@ public final class CallKitController: NSObject, CXProviderDelegate {
                                    sipCallID: String?,
                                    handle: String,
                                    hasVideo: Bool = false) async -> UUID {
-        let uuid = CallIdentity.uuid(serverProvided: serverUUID, sipCallID: sipCallID)
-        let isNew = await registry.firstSeen(uuid: uuid, sipCallID: sipCallID)
-        guard isNew else { return uuid }
-
-        let update = CXCallUpdate()
-        update.remoteHandle = CXHandle(type: .generic, value: handle)
-        update.hasVideo = hasVideo
-        provider.reportNewIncomingCall(with: uuid, update: update) { _ in }
-        return uuid
+        await router.reportIncomingCall(serverUUID: serverUUID,
+                                        sipCallID: sipCallID,
+                                        handle: handle,
+                                        hasVideo: hasVideo)
     }
 
-    // MARK: CXProviderDelegate
+    // MARK: CXProviderDelegate — actions forwarded to the router
 
     public func providerDidReset(_ provider: CXProvider) {
         // CallKit dropped all calls (e.g. a crash recovery); tear down engine calls to match.
-        Task { await engine.hangupAll() }
+        Task { await router.reset() }
     }
+
+    public func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
+        Task { await router.startCall(action) }
+    }
+
+    public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
+        Task { await router.answerCall(action) }
+    }
+
+    public func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+        Task { await router.endCall(action) }
+    }
+
+    public func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
+        Task { await router.setHeld(action) }
+    }
+
+    public func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
+        Task { await router.setMuted(action) }
+    }
+
+    public func provider(_ provider: CXProvider, perform action: CXPlayDTMFCallAction) {
+        Task { await router.playDTMF(action) }
+    }
+
+    // MARK: CXProviderDelegate — audio session lifecycle
 
     public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         // CallKit activated the audio session — only now may PJSIP open the sound device.

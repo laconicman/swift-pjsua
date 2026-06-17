@@ -20,6 +20,11 @@ public enum PJSUAEvent: Sendable {
     /// `sipCallID` is the SIP `Call-ID` header value.
     case callState(call: CallID, state: CallState, sipCallID: String?, lastStatus: Int32)
 
-    /// Call media became active; audio can be connected to the sound device.
-    case callMediaActive(call: CallID)
+    /// The call's media status changed. Emitted on **every** transition (not filtered to
+    /// "active"): the engine surfaces the full status and the app decides what matters —
+    /// mirroring how PJSUA2's `onCallMediaState` hands the app the complete media info and
+    /// lets it react (e.g. reflect `remoteHold` in the UI, stop a ringback on `active`).
+    /// The engine still performs the low-level conference-bridge wiring itself; see
+    /// `pjsuaOnCallMediaState`.
+    case callMediaState(call: CallID, status: CallMediaStatus)
 }

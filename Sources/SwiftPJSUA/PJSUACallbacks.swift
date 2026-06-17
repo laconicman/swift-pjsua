@@ -99,17 +99,28 @@ private func pjsuaOnCallMediaState(_ callId: pjsua_call_id) {
     var info = pjsua_call_info()
     guard pjsua_call_get_info(callId, &info).isSuccess else { return }
 
-    // When the primary stream is active, bridge the call's conference slot to the sound
-    // device (conference slot 0): remote audio → local playback, local capture → remote.
-    // Slot 0 is the device port; with iOS's null-sound-device model it is wired to the
-    // real hardware only while CallKit has activated the audio session (see SwiftPJSUAKit).
+    // Bridge the call's conference slot to the sound device (conference slot 0): remote
+    // audio → local playback, local capture → remote. Slot 0 is the device port; with iOS's
+    // null-sound-device model it is wired to the real hardware only while CallKit has
+    // activated the audio session (see SwiftPJSUAKit). We connect for ACTIVE **and**
+    // REMOTE_HOLD, matching upstream `pjsua_app.c`: on remote hold the slot stays bridged so
+    // resume needs no re-wiring (and any remote on-hold media still plays). This low-level
+    // wiring is the engine's job; the higher-level reaction is the app's (see below).
     // MVP handles the single `conf_slot`; multi-stream/video calls iterate `media[]` later.
-    if info.media_status == PJSUA_CALL_MEDIA_ACTIVE {
+    switch info.media_status {
+    case PJSUA_CALL_MEDIA_ACTIVE, PJSUA_CALL_MEDIA_REMOTE_HOLD:
         let slot = info.conf_slot
         pjsua_conf_connect(slot, 0)
         pjsua_conf_connect(0, slot)
+    default:
+        break
     }
-    pjsuaEventSink?.yield(.callMediaActive(call: CallID(callId)))
+    // Surface every transition; the engine does not filter here — the app decides which
+    // media states matter to it (see `PJSUAEvent.callMediaState`).
+    pjsuaEventSink?.yield(.callMediaState(
+        call: CallID(callId),
+        status: CallMediaStatus(info.media_status)
+    ))
 }
 
 private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointer<pjsua_reg_info>?) {

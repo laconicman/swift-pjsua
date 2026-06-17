@@ -230,10 +230,35 @@ Because `swift-pjsip` is built with `SETUP_AV_AUDIO_SESSION=0`, PJSIP does **not
   `deactivateAudioDevice()` (→ `pjsua_set_no_snd_dev()`), and **nothing else** touches the sound
   device. `SwiftPJSUAKit`'s `CXProviderDelegate` drives them from `didActivate` / `didDeactivate`,
   never from `makeCall`.
-- The media-state callback connects the bridge when media goes active:
-  `pjsua_conf_connect(conf_slot, 0)` + `pjsua_conf_connect(0, conf_slot)` on
-  `PJSUA_CALL_MEDIA_ACTIVE`. This iteration wires the **single-`conf_slot`** case; iterating
-  `media[]`/`media_cnt` for multi-stream calls is deferred (D1).
+- The media-state callback connects the bridge: `pjsua_conf_connect(conf_slot, 0)` +
+  `pjsua_conf_connect(0, conf_slot)` for `PJSUA_CALL_MEDIA_ACTIVE` **and**
+  `PJSUA_CALL_MEDIA_REMOTE_HOLD` — matching upstream `pjsua_app.c`, so a remote hold keeps the
+  slot bridged (resume needs no re-wiring, and any remote on-hold media still plays). This
+  iteration wires the **single-`conf_slot`** case; iterating `media[]`/`media_cnt` for
+  multi-stream calls is deferred (D1).
+- **The engine does not filter media transitions.** `pjsuaOnCallMediaState` emits
+  `PJSUAEvent.callMediaState(call:status:)` on **every** transition, carrying a
+  `CallMediaStatus` (mirroring `pjsua_call_media_status`: `none`/`active`/`localHold`/
+  `remoteHold`/`error`/`unknown`). Which transitions matter — UI for remote hold, stopping a
+  ringback on active, etc. — is the **app's** decision, exactly as PJSUA2's `onCallMediaState`
+  hands the app the full `CallMediaInfo` vector and lets it react. (Earlier this fired a
+  status-less `.callMediaActive` only on active; that swallowed hold/resume and put policy in
+  the core. Confirmed idiomatic via DeepWiki against PJSIP 2.17.)
+
+#### The "two conference types"
+The product must support **both** kinds of conference call PJSIP enables, which are an
+*application-level* distinction, not two different bridges:
+1. **Local mix** — the device hosts the conference: each remote leg is its own `pjsua_call`
+   with its own `conf_slot`, and the app cross-connects the slots through the single
+   `pjmedia_conf` bridge (`pjsua_conf_connect` between call slots, not just to slot 0).
+2. **Server-hosted focus** — a conference-focus URI (RFC 4579) mixes centrally; the device
+   holds **one** call leg to the focus and uses `pjsua_call_send_request` / the event package
+   for roster/control. Media-wise it's an ordinary single-leg call.
+
+Per DeepWiki, PJSIP exposes effectively **one** `pjmedia_conf` bridge, so media-state handling
+is the same for both; the difference is how many legs exist and how their slots are wired.
+Emitting the full media status per leg (above) is what lets the Kit/app implement either model
+without engine changes. Multi-leg slot cross-connection is the `media[]` work deferred in D1.
 
 ### 6.4 SIP push / RFC 8599 — **M1 invariant** (was gap G6)
 Push is the only viable wake path on iOS (a suspended app cannot keep REGISTER alive). The engine
@@ -259,6 +284,23 @@ without two rings for one call. Both paths compute the **same** CallKit `UUID`:
 This lives in `SwiftPJSUAKit` (`CallIdentity` + the `CallRegistry` actor). The engine's only
 obligation is to **surface the SIP `Call-ID`** on `incomingCall` / `callState` events — which it
 now does.
+
+**UUIDv5 corner case (byte order).** The fallback is RFC 4122 / RFC 9562 version-5 over the SIP
+`Call-ID`, implemented in ~15 lines on CryptoKit (`UUID(version5:namespace:)`) rather than a
+third-party library — both surveyed options (`doneservices/UUIDNamespaces`, `baarde/uuid-kit`)
+are single-contributor and inactive, and `UUIDNamespaces` ships no LICENSE. The trap: the
+namespace must be hashed in **network byte order**. Foundation's `UUID.uuid` tuple is already in
+that order, so no byte-swap is needed — but a Microsoft `Guid` stores its first three fields
+little-endian, so interop with a value derived from a .NET GUID would need a swap first. The
+known-answer test pins `UUIDv5(DNS, "www.example.com") = 2ed6657d-e927-568b-95e1-2665a8aea6a2`
+(verified via Python `uuid5` + a hand SHA-1; both an earlier `...ff66` literal and an
+auto-review's `...a1f2` suggestion were wrong).
+
+**`CallRegistry` lifetime (deferred, tracked — was review finding #4).** The dedup map has no
+TTL/eviction yet; entries are dropped only on explicit `remove(uuid:)`. A push whose INVITE never
+arrives leaks an entry. M1 hardening: evict on terminal call state, bound the map, and/or stamp
+entries with a creation time and sweep past a short TTL (longer than the push→INVITE window).
+Marked with `// TODO:` at the `entries` declaration.
 
 ### 6.6 Cancelled / disconnected calls (was gap G4)
 A caller CANCEL before answer surfaces as `on_call_state` → `PJSIP_INV_STATE_DISCONNECTED` with a
@@ -317,16 +359,24 @@ This is the largest and most important chunk. Without it you do not have an iOS 
   <https://developer.apple.com/documentation/callkit/cxprovider>.
 - **PushKit (the contract that terminates your app if you get it wrong).** `VoIPPushHandler` is a
   skeleton (payload schema is a placeholder). Register a
-  `PKPushRegistry` for `.voIP`; declare the VoIP background mode in `Info.plist`. On
-  `pushRegistry(_:didReceiveIncomingPushWith:for:completion:)` you **must** call
-  `CXProvider.reportNewIncomingCall(...)` synchronously, before the method returns, or iOS
-  terminates the app; repeated failures revoke the VoIP token. Do SIP/network work *after*
-  reporting. Put caller identity in the push payload so the call UI can ring without a
-  network round-trip. Docs:
+  `PKPushRegistry` for `.voIP`; declare the VoIP background mode in `Info.plist`. The handler
+  adopts the **`async` variant** `pushRegistry(_:didReceiveIncomingPushWith:for:) async`
+  (iOS 11+, modern API at our iOS 17 floor) instead of the completion-handler form; it
+  `guard`s `type == .voIP` and `await`s `CallKitController.reportIncomingCall(...)`. You
+  **must** call `CXProvider.reportNewIncomingCall(...)` before the method returns (i.e. before
+  the async task completes), or iOS terminates the app; repeated failures revoke the VoIP
+  token. Do SIP/network work *after* reporting. Put caller identity in the push payload so the
+  call UI can ring without a network round-trip. Docs:
   <https://developer.apple.com/documentation/pushkit/pkpushregistrydelegate>; WWDC19
   "Advances in App Background Execution" <https://developer.apple.com/videos/play/wwdc2019/707/>.
-  Edge cases (mainland China bans CallKit; the private `unrestricted-voip` entitlement;
-  `CXProvider.isSupported` is false on Catalyst) are detailed in the field-survey artifact.
+  - *Future (iOS 26.4+):* migrate to
+    `pushRegistry(_:didReceiveIncomingVoIPPushWith:metadata:withCompletionHandler:)` and honour
+    `PKVoIPPushMetadata.mustReport` (`false` when foreground / a call is already active / the
+    push is late) to skip a redundant CallKit report — directly useful for the dual-mode
+    no-double-ring path. Too new for the current floor; tracked as a `// TODO` in
+    `VoIPPushHandler`.
+  - Edge cases (mainland China bans CallKit; the private `unrestricted-voip` entitlement;
+    `CXProvider.isSupported` is false on Catalyst) are detailed in the field-survey artifact.
 - **Reference to study:** [VialerSIPLib](https://github.com/VoIPGRID/VialerSIPLib)'s
   `CallKitProviderDelegate` + `VSLCallManager` (archived, but the best open iOS CallKit-on-PJSIP
   wiring to read).

@@ -18,6 +18,12 @@ public actor CallRegistry {
         }
     }
 
+    // TODO: This map has no TTL / eviction. Today entries are removed only via `remove(uuid:)`
+    // (wired to `CXEndCallAction` in the next Kit iteration). A VoIP push whose INVITE never
+    // arrives (lost, server gives up, race lost) would leak an entry indefinitely. Before this
+    // is production-ready: evict on terminal call state, bound the map size, and/or stamp each
+    // entry with a creation time and sweep entries older than a short TTL (e.g. ~30–60s, longer
+    // than the push→INVITE window). Tracked in docs/Production-Roadmap.md (Milestone 1).
     private var entries: [UUID: Entry] = [:]
 
     public init() {}

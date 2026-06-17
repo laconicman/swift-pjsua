@@ -4,12 +4,16 @@ extension PJSUA {
     // MARK: Calls
 
     /// Place an outbound call. The returned ``CallID`` means the INVITE was *sent*; the
-    /// answered/failed outcome arrives via ``events`` as `.callState`.
+    /// answered/failed outcome arrives via ``events`` as `.callState`. Pass `video: true` for a
+    /// video call (offers one video stream); the GUI layer maps `CXStartCallAction.isVideo`.
     @discardableResult
-    public func makeCall(to uri: String, from account: AccountID) throws -> CallID {
+    public func makeCall(to uri: String, from account: AccountID, video: Bool = false) throws -> CallID {
         precondition(state == .running, "start() must complete before makeCall()")
         var opt = pjsua_call_setting()
         pjsua_call_setting_default(&opt)
+        // vid_cnt defaults to 1 only when video is enabled account-wide; pin it explicitly so a
+        // video call offers exactly one stream and an audio call offers none.
+        opt.vid_cnt = video ? 1 : 0
 
         var callId: pjsua_call_id = -1 // PJSUA_INVALID_ID
         let status = uri.withPJStr { dst -> pj_status_t in

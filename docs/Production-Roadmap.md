@@ -367,13 +367,13 @@ config + `reRegister` seam (§6.4); and `SwiftPJSUAKit` skeletons — `CallKitCo
 - **Full `CXProviderDelegate` action mapping (§10 + D-FULFILL).** `CallKitController` is now a thin
   delegate forwarding start/answer/end/hold/mute/DTMF to the router; answer/start fulfil on
   `.confirmed`, hold/unhold on the reflecting `.callMediaState` — never optimistically.
-  `supportsVideo = true` is set now (D-VIDEO); grouping waits for PR-b.
+  `supportsVideo = true` is set now (D-VIDEO); grouping/video wiring shipped in PR-b (Milestone 3).
 - **`CallRegistry` TTL + eviction** (§6.5, closes review finding #4).
 - **Silent-push → `reRegister`.** `VoIPPushHandler.handleSilentPush(_:account:updatingPush:)` — the
   non-PushKit entry point the app forwards background pushes to (§6.4).
 
 What remains for M1 is the breadth below: AVAudioSession category config and the real push payload
-contract. **PR-b** then adds the video surface and conference primitives (§6.3 / §7 M3).
+contract. **PR-b** added the video surface and conference primitives (now shipped — Milestone 3).
 
 - **AVAudioSession + audio path.** `conf_connect` on media-active in `pjsuaOnCallMediaState` now
   iterates `media[]` and bridges every active audio slot (D1 done). Still to do: configure
@@ -384,7 +384,7 @@ contract. **PR-b** then adds the video surface and conference primitives (§6.3 
   `PJSUA.makeCall`/`answer`/`hangup`/`setMute`/`setHold`+`resume`/`sendDTMF` (done in PR-a). Answer
   and start are fulfilled on `.confirmed`, hold/unhold on the reflecting media-state change, not
   optimistically. Audio is started/stopped in `didActivate`/`didDeactivate`, **not** when
-  `makeCall` returns. `CXSetGroupCallAction` (grouping) is PR-b. Docs:
+  `makeCall` returns. `CXSetGroupCallAction` (grouping) shipped in PR-b (Milestone 3). Docs:
   <https://developer.apple.com/documentation/callkit/cxprovider>;
   <https://developer.apple.com/documentation/callkit/cxproviderdelegate>.
 - **PushKit (the contract that terminates your app if you get it wrong).** `VoIPPushHandler` is a
@@ -424,6 +424,24 @@ contract. **PR-b** then adds the video surface and conference primitives (§6.3 
 ### Milestone 3 — Call features
 - DTMF (RFC 2833 and/or SIP INFO), hold/unhold, mute, speaker routing, multiple/concurrent
   calls, call transfer, early media. Expand the `PJSUA` actor surface accordingly.
+- **Video & conferences — delivered in PR-b** (design doc §6/§7 "As-built"):
+  - **Video (D-VIDEO).** Engine wrappers in `PJSUA+Video.swift` — `addVideoStream` /
+    `removeVideoStream` / `startVideoTransmission` / `stopVideoTransmission` /
+    `changeVideoCaptureDevice` / `sendVideoKeyframe` (all `pjsua_call_set_vid_strm`),
+    `showVideoWindow` / `videoWindowInfo` (→ `VideoWindowInfo`), `videoConferenceSlot(of:sending:)`
+    + `connectVideo` / `disconnectVideo`; `makeCall(to:from:video:)` offers a video stream;
+    `CXStartCallAction.isVideo` is mapped through. Pixel rendering lives in the Offhook app.
+  - **Conferences (D-CONF).** Engine primitives in `PJSUA+Conference.swift` —
+    `connectAudio(_:and:)` / `disconnectAudio(_:and:)` cross-connect call legs on the PJMEDIA
+    bridge (local mixing), and `isConferenceFocus(_:)` detects the `;isfocus` `Contact` param
+    (RFC 4579 server-hosted focus). `CallSessionRouter.setGroup(_:)` maps `CXSetGroupCallAction`
+    to the bridge with a symmetric `groupAdjacency` map for N-way local mixing;
+    `CXCallUpdate.supportsGrouping` / `supportsUngrouping` are advertised and
+    `maximumCallsPerCallGroup = 5`.
+  - **Tail deferrals** (Tech-Debt TD-6/TD-13): app-side pixel rendering, video-conference
+    *layout* (`PJMEDIA_VID_CONF_LAYOUT_*`), and event-surfacing of `isFocus`.
+  - Docs: <https://developer.apple.com/documentation/callkit/cxsetgroupcallaction>;
+    RFC 4579 <https://www.rfc-editor.org/rfc/rfc4579>.
 
 ### Milestone 4 — Hardening, testing, docs
 - **Concurrency:** migrate `enqueue` to `ExecutorJob`; add `withTaskCancellationHandler` so

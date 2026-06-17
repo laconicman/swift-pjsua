@@ -41,6 +41,12 @@ public actor CallSessionRouter {
     /// `.callState(.disconnected)` we must NOT re-report to CallKit (it would be a duplicate).
     private var locallyEnded: Set<UUID> = []
 
+    /// Local-conference membership (design §7.1): for each grouped call, the set of *other*
+    /// calls its audio is bridged to. Symmetric (if A↔B then B∈adjacency[A] and A∈adjacency[B]).
+    /// Drives N-way local mixing — a new member is cross-connected to every existing member of
+    /// the group it joins (`CXSetGroupCallAction`). Empty for un-grouped calls.
+    private var groupAdjacency: [UUID: Set<UUID>] = [:]
+
     private var consumer: Task<Void, Never>?
 
     /// Periodic TTL sweep of orphaned *pending* registry entries — a VoIP push reported a call
@@ -107,6 +113,10 @@ public actor CallSessionRouter {
         update.hasVideo = hasVideo
         update.supportsHolding = true
         update.supportsDTMF = true
+        // Advertise local conferencing so CallKit offers merge/split, mapped to the conference
+        // bridge in setGroup(_:) (§7.1 / §10).
+        update.supportsGrouping = true
+        update.supportsUngrouping = true
         provider.reportNewIncomingCall(with: uuid, update: update) { _ in }
         return uuid
     }
@@ -120,7 +130,7 @@ public actor CallSessionRouter {
             return
         }
         do {
-            let call = try await engine.makeCall(to: action.handle.value, from: account)
+            let call = try await engine.makeCall(to: action.handle.value, from: account, video: action.isVideo)
             await bind(call: call, to: action.callUUID)
             pending[action.callUUID] = .connect(action)
             // Outbound dialing has begun; connecting/connected are reported on .early/.confirmed.
@@ -196,6 +206,29 @@ public actor CallSessionRouter {
         }
     }
 
+    /// Group (merge) or ungroup (split) a call in a local conference, mapped to the engine's
+    /// audio conference bridge (§7.1, **D-CONF**). When `callUUIDToGroupWith` is set, the call
+    /// joins that call's group and is bidirectionally bridged to every existing member; when it
+    /// is `nil`, the call leaves its group and is unbridged from each remaining member. Each leg
+    /// independently keeps its sound-device bridge (wired in the engine media callback), so
+    /// ungrouping a call leaves it a working 1:1 call. Fulfilled once the bridge is wired.
+    func setGroup(_ action: CXSetGroupCallAction) async {
+        guard let call = await registry.entry(for: action.callUUID)?.call else {
+            action.fail()
+            return
+        }
+        do {
+            if let other = action.callUUIDToGroupWith {
+                try await joinGroup(uuid: action.callUUID, call: call, groupingWith: other)
+            } else {
+                await leaveGroup(uuid: action.callUUID, call: call)
+            }
+            action.fulfill()
+        } catch {
+            action.fail()
+        }
+    }
+
     /// CallKit dropped all calls (e.g. crash recovery). Tear down engine calls and clear state.
     func reset() async {
         await engine.hangupAll()
@@ -203,6 +236,7 @@ public actor CallSessionRouter {
         pending.removeAll()
         uuidByCall.removeAll()
         locallyEnded.removeAll()
+        groupAdjacency.removeAll()
     }
 
     // MARK: Engine event → CallKit
@@ -276,6 +310,51 @@ public actor CallSessionRouter {
         }
     }
 
+    // MARK: Local conference membership
+
+    /// Cross-connect `uuid` to every existing member of the group containing `other` (and to
+    /// `other` itself), then record the symmetric adjacency. Members whose engine call is gone
+    /// are skipped. If a bridge connect fails partway, every connection already made is rolled
+    /// back (so a failed `CXSetGroupCallAction` leaves no dangling bridges) before rethrowing.
+    private func joinGroup(uuid: UUID, call: CallID, groupingWith other: UUID) async throws {
+        var targets = groupAdjacency[other] ?? []
+        targets.insert(other)
+        targets.remove(uuid) // never bridge a call to itself.
+        var connected: [(uuid: UUID, call: CallID)] = []
+        do {
+            for member in targets {
+                guard let memberCall = await registry.entry(for: member)?.call else { continue }
+                try await engine.connectAudio(call, and: memberCall)
+                connected.append((member, memberCall))
+                groupAdjacency[uuid, default: []].insert(member)
+                groupAdjacency[member, default: []].insert(uuid)
+            }
+        } catch {
+            // Unwind the partial bridge so the audio state matches the failed CallKit action.
+            for wired in connected {
+                try? await engine.disconnectAudio(call, and: wired.call)
+                groupAdjacency[uuid]?.remove(wired.uuid)
+                groupAdjacency[wired.uuid]?.remove(uuid)
+                if groupAdjacency[wired.uuid]?.isEmpty == true { groupAdjacency[wired.uuid] = nil }
+            }
+            if groupAdjacency[uuid]?.isEmpty == true { groupAdjacency[uuid] = nil }
+            throw error
+        }
+    }
+
+    /// Unbridge `uuid` from each call it is grouped with and drop it from the adjacency map.
+    private func leaveGroup(uuid: UUID, call: CallID) async {
+        guard let members = groupAdjacency[uuid] else { return }
+        for member in members {
+            if let memberCall = await registry.entry(for: member)?.call {
+                try? await engine.disconnectAudio(call, and: memberCall)
+            }
+            groupAdjacency[member]?.remove(uuid)
+            if groupAdjacency[member]?.isEmpty == true { groupAdjacency[member] = nil }
+        }
+        groupAdjacency[uuid] = nil
+    }
+
     // MARK: Helpers
 
     /// Bind an engine ``CallID`` to a CallKit `UUID` in both the reverse index and the registry.
@@ -304,6 +383,14 @@ public actor CallSessionRouter {
         await registry.remove(uuid: uuid)
         pending[uuid] = nil
         locallyEnded.remove(uuid)
+        // Drop the call from any local conference. The engine tears the leg's conference slot
+        // down on hangup, so its bridge links vanish automatically; only the bookkeeping needs
+        // clearing here (no engine disconnect on a dead leg).
+        for member in groupAdjacency[uuid] ?? [] {
+            groupAdjacency[member]?.remove(uuid)
+            if groupAdjacency[member]?.isEmpty == true { groupAdjacency[member] = nil }
+        }
+        groupAdjacency[uuid] = nil
     }
 
     /// Map the last SIP status on a disconnected call to a CallKit end reason. 487 (caller CANCEL

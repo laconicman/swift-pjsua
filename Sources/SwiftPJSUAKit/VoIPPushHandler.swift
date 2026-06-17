@@ -2,14 +2,23 @@ import Foundation
 import PushKit
 import SwiftPJSUA
 
-/// Routes APNs pushes: a **VoIP** push reports an incoming call to CallKit (deduplicated
-/// against the SIP INVITE via ``CallIdentity``); a **silent** push triggers a re-REGISTER
-/// with updated push parameters (``PJSUA/reRegister(_:updatingPush:)``).
+/// Routes APNs pushes to the engine and CallKit:
 ///
-/// - Important: **Skeleton.** The payload schema below (`call_uuid` / `sip_call_id` / `from`)
-///   is a placeholder to be matched to the real server contract, and the app still owns the
-///   `PKPushRegistry` instance and its registration. The dedup + audio wiring it depends on
-///   is real; the payload parsing and the silent-push branch are stubs for the next iteration.
+/// - a **VoIP** push (PushKit, ``pushRegistry(_:didReceiveIncomingPushWith:for:)``) reports an
+///   incoming call to CallKit, deduplicated against the SIP INVITE via ``CallIdentity``;
+/// - a **silent** background push — which is delivered through the app delegate's
+///   `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)`, **not** PushKit —
+///   is forwarded to ``handleSilentPush(_:account:updatingPush:)`` to re-REGISTER with updated
+///   push parameters (``PJSUA/reRegister(_:updatingPush:)``).
+///
+/// - Important: **Skeleton.** The payload schemas (`call_uuid` / `sip_call_id` / `from` for VoIP;
+///   `action == "reregister"` for silent) are placeholders to be matched to the real server
+///   contract, and the app still owns the `PKPushRegistry` instance and its registration.
+///
+/// - SeeAlso: Responding to VoIP Notifications from PushKit
+///   (<https://developer.apple.com/documentation/PushKit/responding-to-voip-notifications-from-pushkit>);
+///   Pushing background updates to your App
+///   (<https://developer.apple.com/documentation/usernotifications/pushing-background-updates-to-your-app>).
 public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
     private let engine: PJSUA
     private let callKit: CallKitController
@@ -53,5 +62,37 @@ public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
         let handle = (payloadDict["from"] as? String) ?? "Unknown"
 
         await callKit.reportIncomingCall(serverUUID: serverUUID, sipCallID: sipCallID, handle: handle)
+    }
+
+    // MARK: Silent push → re-REGISTER
+
+    /// Handle a **silent** background push by re-REGISTERing `account`, optionally swapping in new
+    /// push parameters. Call this from the app delegate's
+    /// `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)` — silent pushes do
+    /// **not** flow through PushKit.
+    ///
+    /// This path is deliberately independent of the VoIP-push answer path and of app-lifecycle
+    /// events: ``PJSUA/reRegister(_:updatingPush:)`` only mutates this account's config and
+    /// registration, so a silent re-REGISTER cannot race or tear down an in-flight incoming call.
+    /// To carry a *regular* APNs token instead of the VoIP `pn-param` (a deviated scenario), build
+    /// the override with ``PushConfiguration/init(params:scope:)`` or
+    /// ``PushConfiguration/apns(teamID:bundleID:token:pushType:scope:)`` (e.g. `pushType: ""`).
+    ///
+    /// - Parameters:
+    ///   - payload: the silent push's `dictionaryPayload` (or `userInfo`).
+    ///   - account: the account to refresh; the app holds this from ``PJSUA/addAccount(id:registrar:username:password:realm:push:makeDefault:)``.
+    ///   - push: replacement push parameters, or `nil` to keep the account's current ones.
+    public func handleSilentPush(_ payload: [AnyHashable: Any],
+                                 account: AccountID,
+                                 updatingPush push: PushConfiguration? = nil) async {
+        // Skeleton contract: a silent push carrying `"action": "reregister"` asks the client to
+        // refresh its registration (e.g. the server rotated push routing). Unrelated silent pushes
+        // are ignored. Match this to the real server payload schema.
+        guard (payload["action"] as? String) == "reregister" else { return }
+        do {
+            try await engine.reRegister(account, updatingPush: push)
+        } catch {
+            // Best-effort: the account's periodic REGISTER refresh recovers if this fails.
+        }
     }
 }

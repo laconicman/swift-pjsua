@@ -230,20 +230,23 @@ Because `swift-pjsip` is built with `SETUP_AV_AUDIO_SESSION=0`, PJSIP does **not
   `deactivateAudioDevice()` (→ `pjsua_set_no_snd_dev()`), and **nothing else** touches the sound
   device. `SwiftPJSUAKit`'s `CXProviderDelegate` drives them from `didActivate` / `didDeactivate`,
   never from `makeCall`.
-- The media-state callback connects the bridge: `pjsua_conf_connect(conf_slot, 0)` +
-  `pjsua_conf_connect(0, conf_slot)` for `PJSUA_CALL_MEDIA_ACTIVE` **and**
-  `PJSUA_CALL_MEDIA_REMOTE_HOLD` — matching upstream `pjsua_app.c`, so a remote hold keeps the
-  slot bridged (resume needs no re-wiring, and any remote on-hold media still plays). This
-  iteration wires the **single-`conf_slot`** case; iterating `media[]`/`media_cnt` for
-  multi-stream calls is deferred (D1).
-- **The engine does not filter media transitions.** `pjsuaOnCallMediaState` emits
-  `PJSUAEvent.callMediaState(call:status:)` on **every** transition, carrying a
-  `CallMediaStatus` (mirroring `pjsua_call_media_status`: `none`/`active`/`localHold`/
-  `remoteHold`/`error`/`unknown`). Which transitions matter — UI for remote hold, stopping a
-  ringback on active, etc. — is the **app's** decision, exactly as PJSUA2's `onCallMediaState`
-  hands the app the full `CallMediaInfo` vector and lets it react. (Earlier this fired a
-  status-less `.callMediaActive` only on active; that swallowed hold/resume and put policy in
-  the core. Confirmed idiomatic via DeepWiki against PJSIP 2.17.)
+- The media-state callback **iterates `media[]`** (bounded by `media_cnt`) and, for each active
+  audio stream, connects the bridge `pjsua_conf_connect(slot, 0)` + `pjsua_conf_connect(0, slot)`
+  for `PJSUA_CALL_MEDIA_ACTIVE` **and** `PJSUA_CALL_MEDIA_REMOTE_HOLD` — matching upstream
+  `pjsua_app.c`, so a remote hold keeps the slot bridged (resume needs no re-wiring, and any
+  remote on-hold media still plays). Video-stream wiring (`pjsua_vid_conf_*`) lands in PR-b; here
+  the video stream's window/capture info is surfaced only.
+- **The engine does not filter media transitions, and surfaces them per stream.**
+  `pjsuaOnCallMediaState` emits `PJSUAEvent.callMediaState(call:media:)` carrying the full
+  **`[CallMediaInfo]`** vector — one element per `pjsua_call_media_info` (kind, per-stream
+  `CallMediaStatus` of `none`/`active`/`localHold`/`remoteHold`/`error`/`unknown`, direction,
+  audio conf-slot, video window/capture) — on **every** transition. This mirrors PJSUA2 handing
+  the app the whole `CallInfo.media[]` vector and letting it react; which streams/states matter —
+  UI for remote hold, stopping a ringback on active, fulfilling a hold/unhold `CXAction` — is the
+  **router/app's** decision, not the core's. (Earlier iterations fired a status-less
+  `.callMediaActive` only on active, then a single aggregate `CallMediaStatus`; both put policy in
+  the core and could express neither video nor multi-stream. Reshaped to per-stream in PR-a —
+  decision **D-MEDIA**. Confirmed idiomatic via DeepWiki against PJSIP 2.17.)
 
 #### The "two conference types"
 The product must support **both** kinds of conference call PJSIP enables, which are an
@@ -257,8 +260,9 @@ The product must support **both** kinds of conference call PJSIP enables, which 
 
 Per DeepWiki, PJSIP exposes effectively **one** `pjmedia_conf` bridge, so media-state handling
 is the same for both; the difference is how many legs exist and how their slots are wired.
-Emitting the full media status per leg (above) is what lets the Kit/app implement either model
-without engine changes. Multi-leg slot cross-connection is the `media[]` work deferred in D1.
+Emitting the full per-stream `[CallMediaInfo]` vector (above) is what lets the Kit/app implement
+either model without engine changes. Cross-connecting slots **between legs** (local-mix
+conferencing) and the video conference bridge are the PR-b work.
 
 ### 6.4 SIP push / RFC 8599 — **M1 invariant** (was gap G6)
 Push is the only viable wake path on iOS (a suspended app cannot keep REGISTER alive). The engine
@@ -296,11 +300,16 @@ known-answer test pins `UUIDv5(DNS, "www.example.com") = 2ed6657d-e927-568b-95e1
 (verified via Python `uuid5` + a hand SHA-1; both an earlier `...ff66` literal and an
 auto-review's `...a1f2` suggestion were wrong).
 
-**`CallRegistry` lifetime (deferred, tracked — was review finding #4).** The dedup map has no
-TTL/eviction yet; entries are dropped only on explicit `remove(uuid:)`. A push whose INVITE never
-arrives leaks an entry. M1 hardening: evict on terminal call state, bound the map, and/or stamp
-entries with a creation time and sweep past a short TTL (longer than the push→INVITE window).
-Marked with `// TODO:` at the `entries` declaration.
+**`CallRegistry` lifetime (implemented in PR-a — closes review finding #4).** Entries are reclaimed
+two ways. A **bound** (live) call — one with an engine `CallID` — is removed on terminal call state
+(`CallSessionRouter` calls `remove(uuid:)` on `.disconnected` and for `CXEndCallAction`). A
+**pending** entry — reported to CallKit but with no `CallID` yet, i.e. a VoIP push whose INVITE
+never arrived — is stamped with a creation time (`createdAt`) and swept past a short TTL
+(`defaultPendingTTL` = 45s, comfortably longer than the push→INVITE window) by
+`sweepExpired(olderThan:)`. The router runs a process-lifetime periodic sweep (every 15s) and, for
+each evicted UUID, withdraws the stale ringing call via
+`reportCall(with:endedAt:reason:.unanswered)`. The clock is injectable (`now:`) so the TTL is
+deterministically unit-testable, and the sweep only reaps pending entries — never a live call.
 
 ### 6.6 Cancelled / disconnected calls (was gap G4)
 A caller CANCEL before answer surfaces as `on_call_state` → `PJSIP_INV_STATE_DISCONNECTED` with a
@@ -325,8 +334,10 @@ shipping closed-source app must carry the PJSIP commercial license **and** G.729
 change; the obligation note stands.
 
 ### 6.9 Deferrals (intentional, tracked)
-- **D1 — `media[]`/`conf_slot` iteration.** MVP wires a single `conf_slot`; multi-stream
-  (`tupleToArray` over the imported `media` tuple) lands with video / multi-call in §7 M3.
+- **D1 — `media[]` iteration. (Done in PR-a.)** `pjsuaOnCallMediaState` now iterates the imported
+  `media` tuple (bounded by `media_cnt`) into `[CallMediaInfo]` and bridges each active audio slot.
+  Cross-connecting slots **between legs** (local-mix conferencing) and the video-conf bridge remain
+  for PR-b (§7 M3).
 - **D2 — thread-local `inPJSIPBlockingCall` re-entrancy flag.** Substituted for now by the
   structural boundary + `assert(pj_thread_is_registered() != 0)` (§6.7). Revisit if a blocking
   path ever needs to detect re-entry from the same thread.
@@ -341,22 +352,41 @@ milestone order — each builds on the last.
 ### Milestone 1 — Call MVP with CallKit, PushKit, and audio
 This is the largest and most important chunk. Without it you do not have an iOS VoIP app.
 
-**Scaffolded in this iteration** (see §6): the engine audio-device API + `conf_connect`-on-media
-(§6.3); `Call-ID`/`lastStatus` on events (§6.5/§6.6); the RFC 8599 push config + `reRegister` seam
-(§6.4); and `SwiftPJSUAKit` skeletons — `CallKitController` (audio-session lifecycle + deduplicated
-`reportNewIncomingCall`) and `VoIPPushHandler` — plus the dual-mode dedup (`CallIdentity` /
-`CallRegistry`). What remains for M1 is the breadth below: AVAudioSession category config, the full
-`CXAction` mapping, and the real push payload contract.
+**Scaffolded in the first iteration** (PR #1, see §6): the engine audio-device API +
+`conf_connect`-on-media (§6.3); `Call-ID`/`lastStatus` on events (§6.5/§6.6); the RFC 8599 push
+config + `reRegister` seam (§6.4); and `SwiftPJSUAKit` skeletons — `CallKitController` and
+`VoIPPushHandler` — plus the dual-mode dedup (`CallIdentity` / `CallRegistry`).
 
-- **AVAudioSession + audio path.** `conf_connect` on media-active in `pjsuaOnCallMediaState` is
-  done for the single-`conf_slot` case (extend to `media[]`/`media_cnt` per D1). Still to do:
-  configure `AVAudioSession` (`.playAndRecord`, `.voiceChat`) in the app/Kit.
+**Added in PR-a** (the lifecycle/media/router slice of the design doc):
+- **Per-stream media model (D-MEDIA).** `PJSUAEvent.callMediaState(call:media:[CallMediaInfo])` and
+  `media[]` iteration in the callback (§6.3, D1 done).
+- **Engine mid-call commands.** `PJSUA.setHold`/`resume`/`setMute`/`sendDTMF` (+ `PJSUAUsageError`).
+- **`CallSessionRouter` (D-ROUTER).** The single consumer of `engine.events`; owns the pending-
+  `CXAction` correlation table and the `CallRegistry` (sole writer after the initial report); maps
+  engine events → CallKit provider reports.
+- **Full `CXProviderDelegate` action mapping (§10 + D-FULFILL).** `CallKitController` is now a thin
+  delegate forwarding start/answer/end/hold/mute/DTMF to the router; answer/start fulfil on
+  `.confirmed`, hold/unhold on the reflecting `.callMediaState` — never optimistically.
+  `supportsVideo = true` is set now (D-VIDEO); grouping waits for PR-b.
+- **`CallRegistry` TTL + eviction** (§6.5, closes review finding #4).
+- **Silent-push → `reRegister`.** `VoIPPushHandler.handleSilentPush(_:account:updatingPush:)` — the
+  non-PushKit entry point the app forwards background pushes to (§6.4).
+
+What remains for M1 is the breadth below: AVAudioSession category config and the real push payload
+contract. **PR-b** then adds the video surface and conference primitives (§6.3 / §7 M3).
+
+- **AVAudioSession + audio path.** `conf_connect` on media-active in `pjsuaOnCallMediaState` now
+  iterates `media[]` and bridges every active audio slot (D1 done). Still to do: configure
+  `AVAudioSession` (`.playAndRecord`, `.voiceChat`) in the app/Kit.
 - **CallKit.** `CallKitController` wires the audio lifecycle (`didActivate`/`didDeactivate` →
-  engine `activate/deactivateAudioDevice()`) and a deduplicated incoming-call report. Still to do:
-  map `CXAnswerCallAction`/`CXEndCallAction`/`CXSetMutedCallAction`/`CXSetHeldCallAction` onto
-  `PJSUA.answer`/`hangup`/mute/hold, and full provider configuration. Audio is started/stopped in
-  `didActivate`/`didDeactivate`, **not** when `makeCall` returns. Docs:
-  <https://developer.apple.com/documentation/callkit/cxprovider>.
+  engine `activate/deactivateAudioDevice()`) and forwards every `CXAction` to `CallSessionRouter`,
+  which maps `CXStartCall`/`CXAnswerCall`/`CXEndCall`/`CXSetMuted`/`CXSetHeld`/`CXPlayDTMF` onto
+  `PJSUA.makeCall`/`answer`/`hangup`/`setMute`/`setHold`+`resume`/`sendDTMF` (done in PR-a). Answer
+  and start are fulfilled on `.confirmed`, hold/unhold on the reflecting media-state change, not
+  optimistically. Audio is started/stopped in `didActivate`/`didDeactivate`, **not** when
+  `makeCall` returns. `CXSetGroupCallAction` (grouping) is PR-b. Docs:
+  <https://developer.apple.com/documentation/callkit/cxprovider>;
+  <https://developer.apple.com/documentation/callkit/cxproviderdelegate>.
 - **PushKit (the contract that terminates your app if you get it wrong).** `VoIPPushHandler` is a
   skeleton (payload schema is a placeholder). Register a
   `PKPushRegistry` for `.voIP`; declare the VoIP background mode in `Info.plist`. The handler

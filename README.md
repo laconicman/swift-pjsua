@@ -62,8 +62,9 @@ let account = try await phone.addAccount(
 Task {
     for await event in phone.events {
         switch event {
-        case let .incomingCall(account, call, sipCallID):
-            // In an app, hand sipCallID to SwiftPJSUAKit to dedup against a VoIP push.
+        case let .incomingCall(account, call, sipCallID, from, offeredVideo):
+            // In an app, hand sipCallID to SwiftPJSUAKit to dedup against a VoIP push;
+            // `from` seeds the CallKit handle and `offeredVideo` its hasVideo flag.
             try? await phone.answer(call)
         case let .callState(call, state, _, lastStatus):
             print("call \(call) → \(state) (\(lastStatus))")

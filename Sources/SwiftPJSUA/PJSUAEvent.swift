@@ -12,19 +12,24 @@ public enum PJSUAEvent: Sendable {
     /// `expiration` the next re-registration interval in seconds (0 when unregistered).
     case registrationState(account: AccountID, active: Bool, statusCode: Int32, expiration: UInt32)
 
-    /// A new inbound INVITE arrived. `sipCallID` is the SIP `Call-ID` header value.
-    case incomingCall(account: AccountID, call: CallID, sipCallID: String?)
+    /// A new inbound INVITE arrived. `sipCallID` is the SIP `Call-ID` header value, `from`
+    /// the remote party's display info/URI (for the CallKit handle on the socket path), and
+    /// `offeredVideo` is `true` when the offer contains a video stream (drives
+    /// `CXCallUpdate.hasVideo`).
+    case incomingCall(account: AccountID, call: CallID, sipCallID: String?,
+                      from: String?, offeredVideo: Bool)
 
     /// The INVITE-session state changed. `lastStatus` is the SIP status of the last event
     /// on the call (e.g. 487 when the caller CANCELs before answer, 200 on success);
     /// `sipCallID` is the SIP `Call-ID` header value.
     case callState(call: CallID, state: CallState, sipCallID: String?, lastStatus: Int32)
 
-    /// The call's media status changed. Emitted on **every** transition (not filtered to
-    /// "active"): the engine surfaces the full status and the app decides what matters —
-    /// mirroring how PJSUA2's `onCallMediaState` hands the app the complete media info and
-    /// lets it react (e.g. reflect `remoteHold` in the UI, stop a ringback on `active`).
-    /// The engine still performs the low-level conference-bridge wiring itself; see
+    /// The call's media changed. Carries the full **per-stream** vector (`media[i]`), emitted
+    /// on every `on_call_media_state` transition (initial SDP and every re-INVITE — hold,
+    /// unhold, add-video). The engine surfaces all streams and the app/router decides what
+    /// matters — mirroring how PJSUA2's `onCallMediaState` hands the app `CallInfo.media[]`
+    /// and lets it react per stream (audio → conference slot, video → window). The engine
+    /// still performs the low-level audio conference-bridge wiring itself; see
     /// `pjsuaOnCallMediaState`.
-    case callMediaState(call: CallID, status: CallMediaStatus)
+    case callMediaState(call: CallID, media: [CallMediaInfo])
 }

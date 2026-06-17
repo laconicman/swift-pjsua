@@ -198,6 +198,14 @@ Decisions baked in now even though pixel rendering is the app's job:
 **D-VIDEO (sign-off):** shape the full video type/event/API surface now; implement engine-side
 window-id surfacing + video-conf connect; defer app-side rendering (it lives in Offhook).
 
+**As-built (PR-b).** `PJSUA+Video.swift`: `addVideoStream` / `removeVideoStream` /
+`startVideoTransmission` / `stopVideoTransmission` / `changeVideoCaptureDevice` / `sendVideoKeyframe`
+(all via `pjsua_call_set_vid_strm`, each initialised with `pjsua_call_vid_strm_op_param_default`);
+`showVideoWindow(_:_:)` (`pjsua_vid_win_set_show`) + `videoWindowInfo(_:)` (`pjsua_vid_win_get_info`)
+returning the new `VideoWindowInfo` value type; `videoConferenceSlot(of:sending:)`
+(`pjsua_call_get_vid_conf_port`) + `connectVideo` / `disconnectVideo`. `makeCall(to:from:video:)`
+offers one video stream (`opt.vid_cnt = 1`). Pixel rendering stays in Offhook.
+
 ---
 
 ## 7. Conferences — both PJSIP models, first-class
@@ -228,6 +236,16 @@ abstraction") — primitives + a thin router mapping from CallKit grouping.
 **D-CONF (sign-off):** engine exposes conference primitives (audio slot connect/disconnect, video
 conf add/connect, `isFocus` detection) + per-stream media; Kit maps CallKit grouping → local-mix and
 detects focus for server-side. No standalone Conference type yet.
+
+**As-built (PR-b).** `PJSUA+Conference.swift`: `audioConferenceSlot(of:)`
+(`pjsua_call_get_conf_port`), `connectAudioSlot` / `disconnectAudioSlot` (directional
+`pjsua_conf_connect` / `pjsua_conf_disconnect`), the bidirectional leg convenience
+`connectAudio(_:and:)` / `disconnectAudio(_:and:)`, and `isConferenceFocus(_:)` (parses
+`pjsua_call_info.remote_contact` for `;isfocus`, since pjsua1 has no focus field). Router
+`setGroup(_:)` maps `CXSetGroupCallAction` to bidirectional slot cross-connects, tracking N-way
+membership in a symmetric `groupAdjacency` map; `supportsGrouping` / `supportsUngrouping` advertised
+on the incoming update and `maximumCallsPerCallGroup = 5`. Video-conference *layout* (compositing
+multiple sources beyond the primitive `connectVideo`) is deferred — see Tech-Debt TD-6.
 
 ---
 
@@ -272,7 +290,7 @@ No new sign-off; this is finishing the scaffolded design.
 
 | `CXProviderDelegate` method | Engine command | Fulfillment rule |
 |---|---|---|
-| `perform: CXStartCallAction` | `makeCall(to:from:)` + `isVideo` | configure audio; fulfill on `.confirmed` (stash) |
+| `perform: CXStartCallAction` | `makeCall(to:from:video:)` (maps `isVideo`) | configure audio; fulfill on `.confirmed` (stash) |
 | `perform: CXAnswerCallAction` | `answer(call, 200)` | **fulfill on `.confirmed`** not immediately ([push][push]) |
 | `perform: CXEndCallAction` | `hangup(call)` + `registry.remove` | fulfill immediately |
 | `perform: CXSetHeldCallAction` | hold: re-INVITE sendonly; unhold: `PJSUA_CALL_UNHOLD` reinvite | fulfill on `.callMediaState` reflecting the change |
@@ -296,6 +314,7 @@ video stream start/stop. All are simple pjsua1 calls run on the engine actor.
 - **PJSUACallbacks.swift** — `pjsuaOnCallMediaState` iterates `info.media[]`; build `[CallMediaInfo]`.
 - **PJSUA+Calls.swift** — add `setHold`, `resume`, `setMute`, `sendDTMF`.
 - **PJSUA+Video.swift** (new) — start/stop transmit, window getters, video-conf wrappers.
+- **VideoWindowInfo.swift** (new) — value type mirroring `pjsua_vid_win_info` (geometry/show/slot).
 - **PJSUA+Conference.swift** (new) — audio slot connect/disconnect; `isFocus` helper.
 
 `Sources/SwiftPJSUAKit/`:
@@ -332,14 +351,23 @@ mapping, layered on the stable contract).
 
 ## 13. Implementation plan & test plan
 
-Commits (Conventional, UPPERCASE TYPE; one logical unit each), on `feat/callkit-lifecycle-and-media`:
+Commits (Conventional, UPPERCASE TYPE; one logical unit each).
+
+**PR-a** (`feat/callkit-lifecycle-and-media`, merged as #2):
 1. `FEAT: per-stream CallMediaInfo media model` (engine types + callback iteration).
 2. `FEAT: CallSessionRouter — consume engine events, drive CallKit, correlate actions`.
 3. `FEAT: full CXProviderDelegate actions (answer/end/hold/mute/DTMF/start)` + engine commands.
 4. `FEAT: registry TTL + terminal-state eviction (closes #4 gap)`.
-5. `FEAT: video surface (CallKit hasVideo + engine window/vid-conf)` *(PR-b if split)*.
-6. `FEAT: conference primitives + grouping/focus mapping` *(PR-b if split)*.
-7. `DOCS: roadmap + tech-debt citations`.
+5. `FEAT: silent-push re-REGISTER branch` + `DOCS: design doc + tech-debt`.
+
+**PR-b** (`feat/video-and-conferences`):
+1. `FEAT: engine audio conference primitives and focus detection` (`PJSUA+Conference.swift`).
+2. `FEAT: engine video stream, window and video-conference wrappers` (`PJSUA+Video.swift`,
+   `VideoWindowInfo.swift`, `makeCall(video:)`).
+3. `FEAT: map CallKit grouping and video to engine conference/video primitives` (router `setGroup`
+   + `groupAdjacency`, `supportsGrouping`/`supportsUngrouping`, `isVideo` → `makeCall(video:)`,
+   controller `CXSetGroupCallAction` + `maximumCallsPerCallGroup = 5`).
+4. `DOCS: roadmap + design + tech-debt as-built notes`.
 
 Test plan (you run on Mac / iOS Simulator — this Linux box can't link iOS-only PJSIP):
 - Engine unit tests: `CallMediaInfo` mapping from synthetic `pjsua_call_info`; `CallState`/status

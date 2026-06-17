@@ -56,16 +56,28 @@ re-enter a blocking `pjsua_*` call — plus a debug `assert(pj_thread_is_registe
 (`PJSUACallbacks.swift`). Revisit only if a blocking path ever needs to detect same-thread re-entry.
 - Refs: roadmap §6.7.
 
-## TD-6 — video & conference surface deferred · deferred-PR-b
-PR-a ships the per-stream media **contract** (`CallMediaInfo` carries video window/capture) and
-`CXProviderConfiguration.supportsVideo = true`, but the following land in PR-b:
-- engine video wrappers (`pjsua_call_set_vid_strm` start/stop transmit, `pjsua_vid_win_*` getters,
-  `pjsua_vid_conf_*`) and app-side pixel rendering (lives in the Offhook app);
-- conference primitives — cross-connecting conf slots **between legs** for local mixing, and
-  `;isfocus` detection for RFC 4579 server-hosted focus;
-- CallKit grouping — `CXSetGroupCallAction`, `CXCallUpdate.supportsGrouping/supportsUngrouping`,
-  `maximumCallsPerCallGroup > 1`.
-- Refs: roadmap §6.3 / §7 M3; RFC 4579 <https://www.rfc-editor.org/rfc/rfc4579>;
+## TD-6 — video & conference surface · shipped-PR-b, with tail deferrals
+PR-a shipped the per-stream media **contract** (`CallMediaInfo` carries video window/capture) and
+`CXProviderConfiguration.supportsVideo = true`. **PR-b shipped** the engine + Kit surface:
+- engine video wrappers — `PJSUA+Video.swift` (`pjsua_call_set_vid_strm` start/stop transmit,
+  add/remove, change-capture-device, send-keyframe; `pjsua_vid_win_*` getters/show via
+  `VideoWindowInfo`; `pjsua_call_get_vid_conf_port` + `pjsua_vid_conf_connect/disconnect`);
+  `makeCall(to:from:video:)`;
+- conference primitives — `PJSUA+Conference.swift` cross-connects conf slots **between legs**
+  (`connectAudio(_:and:)` / `disconnectAudio(_:and:)`) and detects `;isfocus`
+  (`isConferenceFocus(_:)`) for RFC 4579 server-hosted focus;
+- CallKit grouping — `CallSessionRouter.setGroup(_:)` maps `CXSetGroupCallAction` to the bridge with
+  a symmetric `groupAdjacency` map (N-way local mixing), `CXCallUpdate.supportsGrouping` /
+  `supportsUngrouping`, `maximumCallsPerCallGroup = 5`.
+
+Still **deferred** (tail):
+- **app-side pixel rendering** (MetalKit/`UIView`) — lives in the Offhook app, not the SDK;
+- **video-conference layout** — multi-source compositing beyond the primitive `connectVideo`
+  (`PJMEDIA_VID_CONF_LAYOUT_*`); only the default single-source connect is wired today;
+- **event-surfacing of `isFocus`** — exposed as the engine accessor `isConferenceFocus(_:)` rather
+  than on `PJSUAEvent`, to keep the event/`CallMediaInfo` contracts stable (see TD-13). Promote to an
+  event field only if the app proves it needs push-style focus notification.
+- Refs: roadmap §7 M3; RFC 4579 <https://www.rfc-editor.org/rfc/rfc4579>;
   <https://developer.apple.com/documentation/callkit/cxsetgroupcallaction>.
 
 ## TD-7 — G.729 licensing · obligation
@@ -110,3 +122,14 @@ The repo has **no GitHub Actions**; compilation and unit tests are verified on t
 macOS-runner `xcodebuild -destination 'platform=iOS Simulator,...'` job once the build is stable so
 regressions are caught pre-merge.
 - Refs: <https://developer.apple.com/documentation/xcode/building-and-running-an-app>.
+
+## TD-13 — `isFocus` / conference state kept off the event contract · open (deliberate)
+PR-b deliberately did **not** widen `PJSUAEvent` or `CallMediaInfo` to carry conference state.
+`;isfocus` is read on demand via the engine accessor `isConferenceFocus(_:)`, and local-conference
+membership lives in the Kit router's `groupAdjacency` map — not in an engine event. Rationale: the
+engine↔Kit event/media contracts are the most expensive thing to reshape, and nothing in the current
+design needs focus *pushed* (the router queries it when mapping `CXSetGroupCallAction`). Revisit only
+if the app needs unsolicited focus-change notification (e.g. a server promoting a 1:1 to a focus
+mid-call); the fix is a new `PJSUAEvent` case, additively. Avoids the "just-in-case abstraction" the
+maintainer has been burned by.
+- Refs: design doc §6/§7 "As-built (PR-b)"; RFC 4579 <https://www.rfc-editor.org/rfc/rfc4579>.

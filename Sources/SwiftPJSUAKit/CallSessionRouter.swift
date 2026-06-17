@@ -1,5 +1,6 @@
 import CallKit
 import Foundation
+import os
 import SwiftPJSUA
 
 /// The single consumer of ``PJSUA/events`` and the correlation hub between CallKit and the SIP
@@ -59,6 +60,8 @@ public actor CallSessionRouter {
     /// orphaned push is withdrawn within roughly one TTL of arriving.
     private static let sweepInterval: Duration = .seconds(15)
 
+    private static let logger = Logger(subsystem: "SwiftPJSUAKit", category: "CallSessionRouter")
+
     public init(engine: PJSUA, provider: CXProvider, registry: CallRegistry = CallRegistry()) {
         self.engine = engine
         self.provider = provider
@@ -96,12 +99,15 @@ public actor CallSessionRouter {
     /// freshly-learned identifiers onto the same entry (no second ring — §9).
     ///
     /// - Returns: the CallKit `UUID` for this logical call (stable across push and INVITE).
+    /// - Throws: the error from `CXProvider.reportNewIncomingCall(with:update:)` if the system
+    ///   refused to surface the call (blocked caller, Do Not Disturb, etc.). On refusal the
+    ///   registry entry and reverse index are evicted so caller and engine state stay consistent.
     @discardableResult
     func reportIncomingCall(serverUUID: UUID?,
                             sipCallID: String?,
                             handle: String,
                             hasVideo: Bool,
-                            call: CallID? = nil) async -> UUID {
+                            call: CallID? = nil) async throws -> UUID {
         let uuid = CallIdentity.uuid(serverProvided: serverUUID, sipCallID: sipCallID)
         if let call { uuidByCall[call] = uuid }
 
@@ -117,7 +123,13 @@ public actor CallSessionRouter {
         // bridge in setGroup(_:) (§7.1 / §10).
         update.supportsGrouping = true
         update.supportsUngrouping = true
-        provider.reportNewIncomingCall(with: uuid, update: update) { _ in }
+        do {
+            try await provider.reportNewIncomingCall(with: uuid, update: update)
+        } catch {
+            Self.logger.error("reportNewIncomingCall refused for \(uuid, privacy: .public): \(error, privacy: .public)")
+            await evict(uuid: uuid)
+            throw error
+        }
         return uuid
     }
 
@@ -244,11 +256,18 @@ public actor CallSessionRouter {
     private func handle(_ event: PJSUAEvent) async {
         switch event {
         case let .incomingCall(_, call, sipCallID, from, offeredVideo):
-            await reportIncomingCall(serverUUID: nil,
-                                     sipCallID: sipCallID,
-                                     handle: from ?? "Unknown",
-                                     hasVideo: offeredVideo,
-                                     call: call)
+            do {
+                try await reportIncomingCall(serverUUID: nil,
+                                             sipCallID: sipCallID,
+                                             handle: from ?? "Unknown",
+                                             hasVideo: offeredVideo,
+                                             call: call)
+            } catch {
+                // TODO: This logic should be double checked: Should we hangup here?
+                // CallKit refused to ring (blocked / DND); hang up the SIP leg so the peer hears a
+                // clean reject instead of a half-call ringing into the void.
+                try? await engine.hangup(call)
+            }
 
         case let .callState(call, state, _, lastStatus):
             await handleCallState(call: call, state: state, lastStatus: lastStatus)
@@ -397,11 +416,12 @@ public actor CallSessionRouter {
     /// before answer) surfaces as a missed/unanswered call; >= 300 failures as failed; otherwise
     /// the remote simply hung up (BYE).
     private static func endedReason(_ lastStatus: Int32) -> CXCallEndedReason {
+        // TODO: Replace with PJSIP's constants (`rawValue`)
         switch lastStatus {
-        case 487:          return .unanswered          // Request Terminated (caller canceled).
-        case 486, 600, 603: return .remoteEnded        // Busy / Decline — peer rejected.
-        case 300...:       return .failed              // other 3xx–6xx error.
-        default:           return .remoteEnded          // normal BYE / success path.
+        case 487:           .unanswered         // Request Terminated (caller canceled).
+        case 486, 600, 603: .remoteEnded        // Busy / Decline — peer rejected.
+        case 300...:        .failed             // other 3xx–6xx error.
+        default:            .remoteEnded        // normal BYE / success path.
         }
     }
 }

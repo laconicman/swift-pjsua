@@ -57,15 +57,18 @@ public final class CallKitController: NSObject, CXProviderDelegate {
     /// existing UUID, so the user sees a single ring (design §9).
     ///
     /// - Returns: the CallKit UUID used for this call (stable across push and INVITE).
+    /// - Throws: when CallKit refuses to surface the call (blocked caller, DND, etc.). The
+    ///   PushKit contract — calling `reportNewIncomingCall` before the push handler returns — is
+    ///   satisfied regardless of the outcome, so callers on the push path may safely swallow.
     @discardableResult
     public func reportIncomingCall(serverUUID: UUID?,
                                    sipCallID: String?,
                                    handle: String,
-                                   hasVideo: Bool = false) async -> UUID {
-        await router.reportIncomingCall(serverUUID: serverUUID,
-                                        sipCallID: sipCallID,
-                                        handle: handle,
-                                        hasVideo: hasVideo)
+                                   hasVideo: Bool = false) async throws -> UUID {
+        try await router.reportIncomingCall(serverUUID: serverUUID,
+                                            sipCallID: sipCallID,
+                                            handle: handle,
+                                            hasVideo: hasVideo)
     }
 
     // MARK: CXProviderDelegate — actions forwarded to the router

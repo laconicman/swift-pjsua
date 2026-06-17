@@ -314,16 +314,31 @@ public actor CallSessionRouter {
 
     /// Cross-connect `uuid` to every existing member of the group containing `other` (and to
     /// `other` itself), then record the symmetric adjacency. Members whose engine call is gone
-    /// are skipped. Throws (wiring nothing further) if a bridge connect fails.
+    /// are skipped. If a bridge connect fails partway, every connection already made is rolled
+    /// back (so a failed `CXSetGroupCallAction` leaves no dangling bridges) before rethrowing.
     private func joinGroup(uuid: UUID, call: CallID, groupingWith other: UUID) async throws {
         var targets = groupAdjacency[other] ?? []
         targets.insert(other)
         targets.remove(uuid) // never bridge a call to itself.
-        for member in targets {
-            guard let memberCall = await registry.entry(for: member)?.call else { continue }
-            try await engine.connectAudio(call, and: memberCall)
-            groupAdjacency[uuid, default: []].insert(member)
-            groupAdjacency[member, default: []].insert(uuid)
+        var connected: [(uuid: UUID, call: CallID)] = []
+        do {
+            for member in targets {
+                guard let memberCall = await registry.entry(for: member)?.call else { continue }
+                try await engine.connectAudio(call, and: memberCall)
+                connected.append((member, memberCall))
+                groupAdjacency[uuid, default: []].insert(member)
+                groupAdjacency[member, default: []].insert(uuid)
+            }
+        } catch {
+            // Unwind the partial bridge so the audio state matches the failed CallKit action.
+            for wired in connected {
+                try? await engine.disconnectAudio(call, and: wired.call)
+                groupAdjacency[uuid]?.remove(wired.uuid)
+                groupAdjacency[wired.uuid]?.remove(uuid)
+                if groupAdjacency[wired.uuid]?.isEmpty == true { groupAdjacency[wired.uuid] = nil }
+            }
+            if groupAdjacency[uuid]?.isEmpty == true { groupAdjacency[uuid] = nil }
+            throw error
         }
     }
 

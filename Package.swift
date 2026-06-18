@@ -59,6 +59,7 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("MetalKit"),

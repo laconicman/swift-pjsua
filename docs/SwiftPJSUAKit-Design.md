@@ -37,6 +37,35 @@ Untouched cornerstones (decided earlier, *do not reverse casually*):
   engine only opens/closes the sound device on CallKit's audio cues (§5).
 - **G.729 stays** (`PJMEDIA_HAS_BCG729 1`); Opus cannot transcode it.
 
+### 1.1 System frameworks the package links (and why the list drifts)
+
+PJSIP is a **static** library, so the Apple frameworks its objects call into are resolved at
+*final-binary* link time (app or test bundle) — not when SwiftPM builds the library module. The
+`SwiftPJSUA` source target carries the list in `Package.swift`'s `linkerSettings`, and SwiftPM
+propagates it to whatever ultimately links the product. Depending on `SwiftPJSUA` is enough.
+
+Current set:
+
+| Target           | Linked frameworks / libraries |
+|------------------|-------------------------------|
+| `SwiftPJSUA`     | `AVFoundation`, `AudioToolbox`, `CoreAudio`, `CoreMedia`, `CoreVideo`, `VideoToolbox`, `MetalKit`, `Network`, `Security`, `libc++` |
+| `SwiftPJSUAKit`  | + `CallKit`, `PushKit`        |
+
+**This list drifts** along two axes:
+
+1. **PJSIP version** — media backends and transports evolve across releases; a new pjmedia
+   capture/codec implementation can pull in a new Apple SDK.
+2. **The concrete `swift-pjsip` binary** — the committed xcframework is compiled against a
+   specific [`config_site.h`](https://github.com/laconicman/swift-pjsip/blob/main/scripts/config_site.h)
+   (video on, VideoToolbox H.264, BCG729, Apple SSL). Flipping any of those options at rebuild
+   time changes which SDKs `libpjproject.a` actually references.
+
+So treat `Package.swift` as the source of truth and re-verify on every `swift-pjsip` upgrade
+or `config_site.h` flip. A missing framework surfaces as an `Undefined symbol` at link time,
+not at runtime — typically caught first by the **test bundle's** link step, since library
+targets only emit Swift modules and skip the full link. Example: `_CMSampleBufferCreate` →
+`CoreMedia`.
+
 ---
 
 ## 2. The missing piece: a Kit-side **event router** (NEW — central decision)
@@ -189,8 +218,9 @@ Decisions baked in now even though pixel rendering is the app's job:
 - `CallMediaInfo.video` carries the `pjsua_vid_win_id` (remote) and a capture flag (local). Engine
   adds thin wrappers: start/stop transmitting local video (`pjsua_call_set_vid_strm` with
   `PJSUA_CALL_VID_STRM_START/STOP_TRANSMIT`), and getters for the window so the app can attach a
-  view. Actual rendering (MetalKit/`UIView`) is the app's. Package already links CoreVideo /
-  VideoToolbox / MetalKit.
+  view. Actual rendering (MetalKit/`UIView`) is the app's. The video-side Apple frameworks
+  are linked by the package (`CoreMedia`, `CoreVideo`, `VideoToolbox`, `MetalKit`); see §1.1
+  for the full framework list and the drift caveats.
 - **Video while screen locked:** works because CallKit's `didActivate` fires regardless of lock
   state and the device/video bridge are driven from there, not from UI. Local camera capture may be
   restricted while locked — the app reflects that; the signaling path is unaffected.

@@ -64,7 +64,7 @@ extension PJSUA {
             throw PJSUAUsageError.unknownAccount(account)
         }
         if let push { params.push = push }
-        try withAccConfig(params) { cfg in
+        try withAccConfig(params) { cfg -> Void in
             try pjsua_acc_modify(account.raw, &cfg).throwIfFailed()
         }
         accountParameters[account] = params

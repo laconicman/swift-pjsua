@@ -64,7 +64,7 @@ extension PJSUA {
             throw PJSUAUsageError.unknownAccount(account)
         }
         if let push { params.push = push }
-        try withAccConfig(params) { cfg in
+        try withAccConfig(params) { cfg -> Void in
             try pjsua_acc_modify(account.raw, &cfg).throwIfFailed()
         }
         accountParameters[account] = params
@@ -80,7 +80,6 @@ extension PJSUA {
     /// only need to outlive `body`. We own them with ``PJString`` and hold every owner
     /// alive across `body` via `withExtendedLifetime` — no manual `free`, no dangling
     /// pointers if `body` throws.
-    @discardableResult
     private func withAccConfig<T>(_ params: AccountParameters,
                                   _ body: (inout pjsua_acc_config) throws -> T) rethrows -> T {
         var acc = pjsua_acc_config()

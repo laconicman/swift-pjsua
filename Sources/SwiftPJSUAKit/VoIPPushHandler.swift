@@ -1,5 +1,5 @@
 import Foundation
-import os // TODO: Check if `Looger` fits better here
+import os
 import PushKit
 import SwiftPJSUA
 

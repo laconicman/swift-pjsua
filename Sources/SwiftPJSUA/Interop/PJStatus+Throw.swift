@@ -20,7 +20,10 @@ extension pj_status_t {
     func strError() -> String {
         var buffer = [CChar](repeating: 0, count: Int(PJ_ERR_MSG_SIZE))
         let result = pj_strerror(self, &buffer, pj_size_t(buffer.count))
-        return result.string ?? "Unknown PJSIP error \(self)"
+        guard let str = result.string, !str.isEmpty else {
+            return "Unknown PJSIP error \(self)"
+        }
+        return str
     }
 
     /// Throw a ``PJSUAError`` if this status does not represent success.

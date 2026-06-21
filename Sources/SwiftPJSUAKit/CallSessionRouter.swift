@@ -1,5 +1,7 @@
 import CallKit
 import Foundation
+import os
+import PJSIP
 import SwiftPJSUA
 
 /// The single consumer of ``PJSUA/events`` and the correlation hub between CallKit and the SIP
@@ -59,6 +61,8 @@ public actor CallSessionRouter {
     /// orphaned push is withdrawn within roughly one TTL of arriving.
     private static let sweepInterval: Duration = .seconds(15)
 
+    private static let logger = Logger(subsystem: "SwiftPJSUAKit", category: "CallSessionRouter")
+
     public init(engine: PJSUA, provider: CXProvider, registry: CallRegistry = CallRegistry()) {
         self.engine = engine
         self.provider = provider
@@ -96,12 +100,15 @@ public actor CallSessionRouter {
     /// freshly-learned identifiers onto the same entry (no second ring — §9).
     ///
     /// - Returns: the CallKit `UUID` for this logical call (stable across push and INVITE).
+    /// - Throws: the error from `CXProvider.reportNewIncomingCall(with:update:)` if the system
+    ///   refused to surface the call (blocked caller, Do Not Disturb, etc.). On refusal the
+    ///   registry entry and reverse index are evicted so caller and engine state stay consistent.
     @discardableResult
     func reportIncomingCall(serverUUID: UUID?,
                             sipCallID: String?,
                             handle: String,
                             hasVideo: Bool,
-                            call: CallID? = nil) async -> UUID {
+                            call: CallID? = nil) async throws -> UUID {
         let uuid = CallIdentity.uuid(serverProvided: serverUUID, sipCallID: sipCallID)
         if let call { uuidByCall[call] = uuid }
 
@@ -117,7 +124,13 @@ public actor CallSessionRouter {
         // bridge in setGroup(_:) (§7.1 / §10).
         update.supportsGrouping = true
         update.supportsUngrouping = true
-        provider.reportNewIncomingCall(with: uuid, update: update) { _ in }
+        do {
+            try await provider.reportNewIncomingCall(with: uuid, update: update)
+        } catch {
+            Self.logger.error("reportNewIncomingCall refused for \(uuid, privacy: .public): \(error, privacy: .public)")
+            await evict(uuid: uuid)
+            throw error
+        }
         return uuid
     }
 
@@ -244,11 +257,20 @@ public actor CallSessionRouter {
     private func handle(_ event: PJSUAEvent) async {
         switch event {
         case let .incomingCall(_, call, sipCallID, from, offeredVideo):
-            await reportIncomingCall(serverUUID: nil,
-                                     sipCallID: sipCallID,
-                                     handle: from ?? "Unknown",
-                                     hasVideo: offeredVideo,
-                                     call: call)
+            do {
+                try await reportIncomingCall(serverUUID: nil,
+                                             sipCallID: sipCallID,
+                                             handle: from ?? "Unknown",
+                                             hasVideo: offeredVideo,
+                                             call: call)
+            } catch {
+                // CallKit refused to ring (blocked / DND); reject the SIP leg with
+                // PJSIP_SC_TEMPORARILY_UNAVAILABLE (480) so the peer hears a clean reject instead
+                // of ringing into the void. 480 is preferred over PJSIP_SC_DECLINE (603): DND is
+                // transient, and we cannot distinguish DND from a blocked caller at this layer
+                // (see CXErrorCodeIncomingCallError.Code).
+                try? await engine.hangup(call, statusCode: PJSIP_SC_TEMPORARILY_UNAVAILABLE.rawValue)
+            }
 
         case let .callState(call, state, _, lastStatus):
             await handleCallState(call: call, state: state, lastStatus: lastStatus)
@@ -393,15 +415,21 @@ public actor CallSessionRouter {
         groupAdjacency[uuid] = nil
     }
 
-    /// Map the last SIP status on a disconnected call to a CallKit end reason. 487 (caller CANCEL
-    /// before answer) surfaces as a missed/unanswered call; >= 300 failures as failed; otherwise
-    /// the remote simply hung up (BYE).
+    /// Map the last SIP status on a disconnected call to a CallKit end reason.
+    /// `PJSIP_SC_REQUEST_TERMINATED` (487, caller CANCEL before answer) surfaces as a
+    /// missed/unanswered call; >= 300 failures as failed; otherwise the remote simply hung up (BYE).
     private static func endedReason(_ lastStatus: Int32) -> CXCallEndedReason {
-        switch lastStatus {
-        case 487:          return .unanswered          // Request Terminated (caller canceled).
-        case 486, 600, 603: return .remoteEnded        // Busy / Decline — peer rejected.
-        case 300...:       return .failed              // other 3xx–6xx error.
-        default:           return .remoteEnded          // normal BYE / success path.
+        switch UInt32(bitPattern: lastStatus) {
+        case PJSIP_SC_REQUEST_TERMINATED.rawValue:                                     // 487
+            .unanswered
+        case PJSIP_SC_BUSY_HERE.rawValue,                                              // 486
+             PJSIP_SC_BUSY_EVERYWHERE.rawValue,                                        // 600
+             PJSIP_SC_DECLINE.rawValue:                                                // 603
+            .remoteEnded
+        case 300...:
+            .failed
+        default:
+            .remoteEnded
         }
     }
 }

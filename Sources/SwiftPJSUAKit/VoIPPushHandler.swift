@@ -1,4 +1,5 @@
 import Foundation
+import os
 import PushKit
 import SwiftPJSUA
 
@@ -20,6 +21,8 @@ import SwiftPJSUA
 ///   Pushing background updates to your App
 ///   (<https://developer.apple.com/documentation/usernotifications/pushing-background-updates-to-your-app>).
 public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
+    private static let logger = Logger(subsystem: "SwiftPJSUAKit", category: "VoIPPushHandler")
+
     private let engine: PJSUA
     private let callKit: CallKitController
 
@@ -61,7 +64,14 @@ public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
         let sipCallID = payloadDict["sip_call_id"] as? String
         let handle = (payloadDict["from"] as? String) ?? "Unknown"
 
-        await callKit.reportIncomingCall(serverUUID: serverUUID, sipCallID: sipCallID, handle: handle)
+        do {
+            try await callKit.reportIncomingCall(serverUUID: serverUUID, sipCallID: sipCallID, handle: handle)
+        } catch {
+            // PushKit's contract is satisfied — reportNewIncomingCall ran before this returns. The
+            // system declined to ring (blocked caller, DND), which is its prerogative; nothing for
+            // us to do beyond surfacing the refusal in the log.
+            Self.logger.error("VoIP push report declined by CallKit: \(error, privacy: .public)")
+        }
     }
 
     // MARK: Silent push → re-REGISTER

@@ -163,7 +163,7 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     }
     // "Active" = a renewing registration that the server accepted (2xx) with a live
     // expiration. A successful un-REGISTER (renewing == false, expiration == 0) is inactive.
-    let active = renewing && (200..<300).contains(statusCode) && expiration > 0
+    let active = renewing && (Int32(PJSIP_SC_OK.rawValue) ..< 300).contains(statusCode) && expiration > 0
     pjsuaEventSink?.yield(.registrationState(
         account: AccountID(accId),
         active: active,

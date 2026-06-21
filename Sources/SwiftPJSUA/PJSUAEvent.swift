@@ -8,7 +8,8 @@ import PJSIP
 /// a stable CallKit UUID so a VoIP push and the matching INVITE over a persisted
 /// connection resolve to the *same* call (no double ring). See `SwiftPJSUAKit`.
 public enum PJSUAEvent: Sendable {
-    /// Registration state changed. `statusCode` is the SIP status (e.g. 200, 401, 403),
+    /// Registration state changed. `statusCode` is the SIP response code (e.g.
+    /// `PJSIP_SC_OK` / 200, 401, 403),
     /// `expiration` the next re-registration interval in seconds (0 when unregistered).
     case registrationState(account: AccountID, active: Bool, statusCode: Int32, expiration: UInt32)
 
@@ -20,7 +21,8 @@ public enum PJSUAEvent: Sendable {
                       from: String?, offeredVideo: Bool)
 
     /// The INVITE-session state changed. `lastStatus` is the SIP status of the last event
-    /// on the call (e.g. 487 when the caller CANCELs before answer, 200 on success);
+    /// on the call (e.g. `PJSIP_SC_REQUEST_TERMINATED` / 487 when the caller CANCELs before
+    /// answer, `PJSIP_SC_OK` / 200 on success);
     /// `sipCallID` is the SIP `Call-ID` header value.
     case callState(call: CallID, state: CallState, sipCallID: String?, lastStatus: Int32)
 

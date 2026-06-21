@@ -25,13 +25,15 @@ extension PJSUA {
         return CallID(callId)
     }
 
-    /// Answer an incoming call (default 200 OK).
-    public func answer(_ call: CallID, statusCode: UInt32 = 200) throws {
+    /// Answer an incoming call (default ``SIPStatusCode/ok`` / 200).
+    public func answer(_ call: CallID, statusCode: UInt32 = UInt32(SIPStatusCode.ok)) throws {
         try pjsua_call_answer(call.raw, statusCode, nil, nil).throwIfFailed()
     }
 
-    /// Hang up a call (default 603 Decline; use 486 Busy, 487 Cancelled, etc.).
-    public func hangup(_ call: CallID, statusCode: UInt32 = 603) throws {
+    /// Hang up a call (default ``SIPStatusCode/decline`` / 603). Pass
+    /// ``SIPStatusCode/temporarilyUnavailable`` (480), ``SIPStatusCode/busyHere`` (486),
+    /// ``SIPStatusCode/requestTerminated`` (487), etc. for other rejection reasons.
+    public func hangup(_ call: CallID, statusCode: UInt32 = UInt32(SIPStatusCode.decline)) throws {
         try pjsua_call_hangup(call.raw, statusCode, nil, nil).throwIfFailed()
     }
 

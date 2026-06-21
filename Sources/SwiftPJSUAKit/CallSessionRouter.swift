@@ -263,10 +263,11 @@ public actor CallSessionRouter {
                                              hasVideo: offeredVideo,
                                              call: call)
             } catch {
-                // TODO: This logic should be double checked: Should we hangup here?
-                // CallKit refused to ring (blocked / DND); hang up the SIP leg so the peer hears a
-                // clean reject instead of a half-call ringing into the void.
-                try? await engine.hangup(call)
+                // CallKit refused to ring (blocked / DND); reject the SIP leg with 480 Temporarily
+                // Unavailable so the peer hears a clean reject instead of ringing into the void.
+                // 480 is preferred over 603 Decline: DND is transient, and we cannot distinguish
+                // DND from a blocked caller at this layer (see CXErrorCodeIncomingCallError.Code).
+                try? await engine.hangup(call, statusCode: UInt32(SIPStatusCode.temporarilyUnavailable))
             }
 
         case let .callState(call, state, _, lastStatus):
@@ -412,16 +413,19 @@ public actor CallSessionRouter {
         groupAdjacency[uuid] = nil
     }
 
-    /// Map the last SIP status on a disconnected call to a CallKit end reason. 487 (caller CANCEL
-    /// before answer) surfaces as a missed/unanswered call; >= 300 failures as failed; otherwise
-    /// the remote simply hung up (BYE).
+    /// Map the last SIP status on a disconnected call to a CallKit end reason.
+    /// ``SIPStatusCode/requestTerminated`` (caller CANCEL before answer) surfaces as a
+    /// missed/unanswered call; >= 300 failures as failed; otherwise the remote simply hung up (BYE).
     private static func endedReason(_ lastStatus: Int32) -> CXCallEndedReason {
-        // TODO: Replace with PJSIP's constants (`rawValue`)
         switch lastStatus {
-        case 487:           .unanswered         // Request Terminated (caller canceled).
-        case 486, 600, 603: .remoteEnded        // Busy / Decline — peer rejected.
-        case 300...:        .failed             // other 3xx–6xx error.
-        default:            .remoteEnded        // normal BYE / success path.
+        case SIPStatusCode.requestTerminated:
+            .unanswered   // 487 Request Terminated — caller canceled.
+        case SIPStatusCode.busyHere, SIPStatusCode.busyEverywhere, SIPStatusCode.decline:
+            .remoteEnded  // 486 / 600 / 603 — peer rejected.
+        case 300...:
+            .failed       // other 3xx–6xx error.
+        default:
+            .remoteEnded  // normal BYE / success path.
         }
     }
 }

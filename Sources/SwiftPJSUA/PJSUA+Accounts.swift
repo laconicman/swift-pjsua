@@ -80,6 +80,7 @@ extension PJSUA {
     /// only need to outlive `body`. We own them with ``PJString`` and hold every owner
     /// alive across `body` via `withExtendedLifetime` — no manual `free`, no dangling
     /// pointers if `body` throws.
+    @discardableResult
     private func withAccConfig<T>(_ params: AccountParameters,
                                   _ body: (inout pjsua_acc_config) throws -> T) rethrows -> T {
         var acc = pjsua_acc_config()

@@ -31,6 +31,12 @@ extension PJSUA {
                            realm: String = "*",
                            push: PushConfiguration? = nil,
                            makeDefault: Bool = true) throws -> AccountID {
+        // The pjsua account table is a fixed array sized PJSUA_MAX_ACC at binary build time
+        // (4 in the shipped PJ_CONFIG_IPHONE build); overflowing it is a hard C assert
+        // (pjsua_acc_add, pjsua_acc.c) — a crash, not an error return. Guard and throw.
+        guard pjsua_acc_get_count() < UInt32(PJSUA_MAX_ACC) else {
+            throw PJSUAUsageError.accountTableFull(capacity: UInt32(PJSUA_MAX_ACC))
+        }
         let params = AccountParameters(
             id: id, registrar: registrar, username: username,
             password: password, realm: realm, push: push
@@ -48,6 +54,18 @@ extension PJSUA {
     /// Toggle registration for an account (REGISTER / un-REGISTER).
     public func setRegistration(_ account: AccountID, renew: Bool) throws {
         try pjsua_acc_set_registration(account.raw, renew.pjBool).throwIfFailed()
+    }
+
+    /// Remove an account: un-REGISTERs (best effort), deletes it from pjsua, and frees its
+    /// slot in the fixed account table (`pjsua_acc_del` — see ``addAccount``'s capacity note).
+    /// Any calls still using the account are unaffected at the SIP-dialog level but can no
+    /// longer authenticate re-INVITEs; hang up first.
+    ///
+    /// - Important: pjsua **recycles** freed ids — a later ``addAccount`` may return this same
+    ///   ``AccountID``. Consumers keeping per-account state keyed by id must drop it here.
+    public func removeAccount(_ account: AccountID) throws {
+        try pjsua_acc_del(account.raw).throwIfFailed()
+        accountParameters[account] = nil
     }
 
     /// Re-REGISTER an account, optionally replacing its push parameters first.

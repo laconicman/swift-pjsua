@@ -90,12 +90,26 @@ public actor PJSUA {
 
         try pjsua_init(&cfg, &log, &media).throwIfFailed()
 
-        // 3. transport
+        // 3. transport(s)
         var tcfg = pjsua_transport_config()
         pjsua_transport_config_default(&tcfg)
         tcfg.port = config.port
         var transportId: pjsua_transport_id = -1 // PJSUA_INVALID_ID
         try pjsua_transport_create(config.transport.pjType, &tcfg, &transportId).throwIfFailed()
+
+        // With a UDP primary, also open a TCP listener on the same port. A request within
+        // 200 bytes of the MTU must use a stream transport (RFC 3261 §18.1.1); pjsip switches
+        // to TCP automatically above PJSIP_UDP_SIZE_THRESHOLD (1300) — but only if a TCP
+        // transport exists. Without one, a big INVITE (SDP + digest auth ≈ 1.6 kB) fragments
+        // on UDP and is dropped silently (observed live against Flexisip). This also lets
+        // accounts register against ";transport=tcp" registrars.
+        if config.transport == .udp {
+            var tcp = pjsua_transport_config()
+            pjsua_transport_config_default(&tcp)
+            tcp.port = config.port
+            var tcpId: pjsua_transport_id = -1 // PJSUA_INVALID_ID
+            try pjsua_transport_create(PJSIP_TRANSPORT_TCP, &tcp, &tcpId).throwIfFailed()
+        }
 
         // 4. go
         try pjsua_start().throwIfFailed()

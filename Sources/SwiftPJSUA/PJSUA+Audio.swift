@@ -30,4 +30,17 @@ extension PJSUA {
     public func deactivateAudioDevice() {
         _ = pjsua_set_no_snd_dev()
     }
+
+    /// Install PJMEDIA's **null sound device** as the conference-bridge master port
+    /// (`pjsua_set_null_snd_dev`).
+    ///
+    /// The bridge is normally clocked by the opened sound device; with no device, no frames
+    /// are pumped and streams neither send nor receive. The null device supplies that clock
+    /// *without touching audio hardware* — no `AVAudioSession`, no microphone permission —
+    /// so RTP flows headlessly. Intended for integration tests / CI and other hosts where
+    /// opening the hardware is undesirable; switch to the real device with
+    /// ``activateAudioDevice()`` when audible audio is needed.
+    public func activateNullAudioDevice() throws {
+        try pjsua_set_null_snd_dev().throwIfFailed()
+    }
 }

@@ -133,3 +133,60 @@ if the app needs unsolicited focus-change notification (e.g. a server promoting 
 mid-call); the fix is a new `PJSUAEvent` case, additively. Avoids the "just-in-case abstraction" the
 maintainer has been burned by.
 - Refs: design doc §6/§7 "As-built (PR-b)"; RFC 4579 <https://www.rfc-editor.org/rfc/rfc4579>.
+
+## TD-14 — STUN/ICE/TURN and DNS are in the binary but unexposed by the engine · open (M2)
+`swift-pjsip`'s `config_site.h` disables neither `pjnath` (ICE/STUN/TURN) nor `pjlib-util`
+DNS, so the prebuilt binary already supports both — but the `PJSUA` actor surfaces no way to
+configure them. The user-facing connectivity goals are therefore pure engine-surface work, not
+a rebuild:
+- **STUN:** `pjsua_config.stun_srv_cnt` / `stun_srv[]`; ICE via `pjsua_media_config.enable_ice`
+  and per-account `pjsua_acc_config.ice_cfg`; TURN via `turn_cfg`.
+- **DNS:** async SRV resolution via `pjsua_config.nameserver_cnt` / `nameserver[]`; a *custom*
+  resolver via `pjsip_endpt_set_resolver` over a `pj_dns_resolver`.
+- Mind the **SRV-vs-A fallback** (roadmap §7 M2): some providers publish no SRV records, so an
+  SRV-only path fails to register — fall back to plain A/AAAA resolution.
+- Refs: roadmap §7 M2; pjsua.h; DeepWiki *NAT Traversal (ICE, STUN, TURN)*.
+
+## TD-15 — pure-logic types are not headlessly testable · open (relates TD-8, TD-12)
+Because every target transitively imports the iOS-only `PJSIP`, even PJSIP-independent logic
+runs only on the iOS Simulator. The genuinely pure pieces — `UUID(version5:)` and
+`CallIdentity` (Foundation/CryptoKit only) — could move to a leaf module with **no**
+`import PJSIP`, so the UUIDv5 known-answer and identity-resolution tests run on macOS/Linux CI.
+The PJSIP-typed logic (`CallRegistry` via `CallID`, the `CallState`/`Transport`/`CallMediaInfo`
+mappings) still needs the macOS slice (TD-8) to test headlessly. Splitting the leaf module is
+cheap, low-coupling, and unblocks a fast CI signal independent of the simulator.
+- Refs: TD-8; TD-12; <https://www.swift.org/documentation/server/guides/testing.html>.
+
+## TD-16 — no outbound-proxy surface; big INVITEs can fragment on UDP · open (found live 2026-07-04)
+Integration testing against Flexisip (`sip.linphone.org`) surfaced a transport trap: the proxy
+challenges INVITE (407), and the authenticated resend (~1.6 kB of SDP + digest) exceeds
+`PJSIP_UDP_SIZE_THRESHOLD` (1300). pjsip's RFC 3261 §18.1.1 UDP→TCP auto-switch does **not**
+apply to that resend (the reused `tdata` keeps its already-resolved UDP destination), so the
+request fragments on UDP and is dropped silently — the call just never confirms. Mitigations
+shipped in the engine: `start()` now opens a TCP listener alongside a UDP primary (enables the
+size switch where it does apply, and `;transport=tcp` registrars); the reliable per-call fix is
+an explicit `;transport=` param in the dial URI. The *proper* account-level fix is exposing
+`pjsua_acc_config.proxy[]` (outbound proxy / route set) so every request for an account follows
+the proxy's transport — standard softphone practice (Linphone, Telephone). Engine surface only;
+no rebuild needed.
+- Refs: RFC 3261 §18.1.1; `sip_config.h` `PJSIP_UDP_SIZE_THRESHOLD`/`PJSIP_DONT_SWITCH_TO_TCP`;
+  pjsua.h `pjsua_acc_config.proxy`.
+
+## TD-17 — SIP transaction timers unexposed; the "32 seconds" is magic to consumers · open
+A silent registrar surfaces as a 408 only after **PJSIP_TD_TIMEOUT = 32 000 ms** — RFC 3261's
+Timer B/F (64 × T1, T1 = 500 ms). pjsip exposes all of it at **runtime** — `pjsip_cfg()->tsx`
+(`t1`, `t2`, `t4`, `td`, settable before init) — but the engine surfaces none of it, so
+consumers either hard-code waits that outlast 32 s (the Offhook test harness uses 40 s) or
+can't tighten failure detection on flaky networks (a mobile app may want td ≈ 8–10 s + its own
+retry). Discharge: a `Configuration.transactionTimeout` (or a narrow `timers` sub-struct)
+applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC default.
+- Verified vs master 2026-07-04: **no** per-account/per-call/per-regc knob exists
+  (`REGC_TSX_TIMEOUT` is a fixed 33 000 ms, `sip_reg.c:50`). Two refinements: (1) **writing
+  `pjsip_cfg()->tsx.*` after init is a no-op** — values are cached in statics
+  (`sip_transaction.c:125-133`); post-init changes require `pjsip_tsx_set_timers()` (#2781),
+  and already-scheduled timers keep their old values either way. Our "before `pjsua_init`"
+  placement is load-bearing — keep it. (2) master has per-INVITE-transaction
+  `pjsip_tsx_set_timeout()` (`sip_transaction.c:2035`) — a finer-grained option if we ever
+  want per-call timeouts instead of a global.
+- Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
+  `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.

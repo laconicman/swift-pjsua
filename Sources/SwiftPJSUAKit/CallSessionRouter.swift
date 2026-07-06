@@ -33,9 +33,13 @@ public actor CallSessionRouter {
     /// App-facing relay of `.registrationState` events. The router consumes the engine stream
     /// **exclusively** (it is single-consumer), and registration has no CallKit mapping (§3) —
     /// so the app's account UI observes it here instead of reading `engine.events` itself.
-    public typealias RegistrationObserver = @Sendable (AccountID, _ active: Bool,
-                                                       _ statusCode: Int32,
-                                                       _ expiration: UInt32) -> Void
+    ///
+    /// `@MainActor` by type, so the closure body runs on the main actor: the app updates UI
+    /// directly, with no risk of an off-main mutation and no manual hop to remember. The router
+    /// `await`s the main-actor hop when it fires (see `handle`).
+    public typealias RegistrationObserver = @MainActor @Sendable (AccountID, _ active: Bool,
+                                                                  _ statusCode: Int32,
+                                                                  _ expiration: UInt32) -> Void
     private var registrationObserver: RegistrationObserver?
 
     /// Connection-establishing / hold actions awaiting the engine event that resolves them.
@@ -101,8 +105,8 @@ public actor CallSessionRouter {
         outgoingAccount = account
     }
 
-    /// Set (or clear) the app's registration observer. Invoked on the router's executor; hop to
-    /// the main actor inside the closure for UI updates.
+    /// Set (or clear) the app's registration observer. The closure is `@MainActor`, so it runs
+    /// on the main actor — update UI directly; no manual thread hop needed.
     public func setRegistrationObserver(_ observer: RegistrationObserver?) {
         registrationObserver = observer
     }
@@ -293,8 +297,8 @@ public actor CallSessionRouter {
             handleMediaState(call: call, media: media)
 
         case let .registrationState(account, active, statusCode, expiration):
-            // No CallKit mapping (§3) — relay to the app's account UI.
-            registrationObserver?(account, active, statusCode, expiration)
+            // No CallKit mapping (§3) — relay to the app's account UI on the main actor.
+            await registrationObserver?(account, active, statusCode, expiration)
         }
     }
 

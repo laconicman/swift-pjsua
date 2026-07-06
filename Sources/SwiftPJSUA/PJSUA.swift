@@ -97,12 +97,23 @@ public actor PJSUA {
         var transportId: pjsua_transport_id = -1 // PJSUA_INVALID_ID
         try pjsua_transport_create(config.transport.pjType, &tcfg, &transportId).throwIfFailed()
 
-        // With a UDP primary, also open a TCP listener on the same port. A request within
-        // 200 bytes of the MTU must use a stream transport (RFC 3261 §18.1.1); pjsip switches
-        // to TCP automatically above PJSIP_UDP_SIZE_THRESHOLD (1300) — but only if a TCP
-        // transport exists. Without one, a big INVITE (SDP + digest auth ≈ 1.6 kB) fragments
-        // on UDP and is dropped silently (observed live against Flexisip). This also lets
-        // accounts register against ";transport=tcp" registrars.
+        // With a UDP primary, also open a TCP listener. A request within 200 bytes of the MTU
+        // must use a stream transport (RFC 3261 §18.1.1); pjsip switches to TCP automatically
+        // above PJSIP_UDP_SIZE_THRESHOLD (1300) — but only if a TCP transport exists. Without
+        // one, a big INVITE (SDP + digest auth ≈ 1.6 kB) fragments on UDP and is dropped
+        // silently (observed live against Flexisip). This also lets accounts register against
+        // ";transport=tcp" registrars.
+        //
+        // DEBUG SIMPLIFICATIONS (deliberate for Phase 0; see Tech-Debt TD-18):
+        //  - Same port as UDP. Safe here — UDP and TCP are separate protocol families, so
+        //    both binding 5060 never collides, and the IANA default *is* 5060 for both. It is
+        //    NOT a general rule: TLS defaults to 5061, and a provider may mandate a specific
+        //    non-default port per transport — the real transport model needs per-transport
+        //    port config, which this single `config.port` does not express.
+        //  - Fail-fast. If the TCP bind fails (e.g. port already held by another TCP listener)
+        //    the whole `start()` throws and tears down the UDP transport. Correct for a debug
+        //    engine — you want to know TCP did not come up (it silently disables the §18.1.1
+        //    switch) — but a production build may prefer best-effort (log and continue on UDP).
         if config.transport == .udp {
             var tcp = pjsua_transport_config()
             pjsua_transport_config_default(&tcp)

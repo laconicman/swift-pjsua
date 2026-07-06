@@ -190,3 +190,19 @@ applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC
   want per-call timeouts instead of a global.
 - Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
   `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.
+
+## TD-18 — transport port model is a Phase-0 simplification · open (found via PR #7 review)
+`start()` opens the primary transport on `config.port` and, for a UDP primary, a **TCP listener
+on the same port** (TD-16 mitigation). Two simplifications are deliberate for now and should be
+lifted before Phase 2's per-account transport policy:
+- **Single shared port.** Same-port UDP+TCP is safe (separate protocol families; IANA default
+  is 5060 for both), but it is *not* a general rule: **TLS defaults to 5061**, and providers may
+  mandate a specific non-default port per transport. One `config.port` cannot express a
+  per-transport port map. Discharge: a transport list (`[(transport, port)]`) or per-transport
+  port config, aligned with the per-account transport/TLS policy planned for Phase 2.
+- **Fail-fast on the TCP bind.** If the TCP `pjsua_transport_create` fails, all of `start()`
+  throws (tearing down UDP). Correct for a debug engine — a silent missing-TCP disables the
+  §18.1.1 size switch — but a production build may prefer best-effort (log + continue on UDP,
+  surface "TCP unavailable" as state). Decide when the transport surface is generalised.
+- Refs: PR #7 Devin review (#2); RFC 3261 §18 (transports); IANA SIP ports (5060 UDP/TCP, 5061
+  TLS); ties to Phase 2 per-account transport policy and TD-16.

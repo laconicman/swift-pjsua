@@ -11,10 +11,17 @@ extension PJSUA {
     /// when the stream at that index has no active session (e.g. before media is up, or after
     /// disconnect) — wraps `pjsua_call_get_stream_info` + `pjsua_call_get_stream_stat`.
     public func statistics(for call: CallID, mediaIndex: Int = 0) throws -> CallStreamStatistics {
+        // `UInt32(exactly:)` converts once (DRY — reused in both C calls) and returns nil for a
+        // negative Int rather than trapping like `UInt32(_:)`. Only the negative case is ours to
+        // guard: pjsua's `med_idx` is `unsigned` and a too-large value returns PJ_EINVAL cleanly
+        // (`if (med_idx >= call->med_cnt) goto on_return;`, pjsua_call.c) — no OOB, no assert.
+        guard let index = UInt32(exactly: mediaIndex) else {
+            throw PJSUAUsageError.invalidMediaIndex(mediaIndex)
+        }
         var info = pjsua_stream_info()
-        try pjsua_call_get_stream_info(call.raw, UInt32(mediaIndex), &info).throwIfFailed()
+        try pjsua_call_get_stream_info(call.raw, index, &info).throwIfFailed()
         var stat = pjsua_stream_stat()
-        try pjsua_call_get_stream_stat(call.raw, UInt32(mediaIndex), &stat).throwIfFailed()
+        try pjsua_call_get_stream_stat(call.raw, index, &stat).throwIfFailed()
 
         // `info.info` is the aud/vid/txt union — read only the arm `info.type` selects.
         let codec: CallStreamStatistics.Codec

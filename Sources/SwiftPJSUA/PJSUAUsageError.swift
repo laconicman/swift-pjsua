@@ -17,6 +17,13 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
     /// with ``PJSUA/removeAccount(_:)`` or rebuild `swift-pjsip` with a larger table.
     case accountTableFull(capacity: UInt32)
 
+    /// A media-index argument was negative. pjsua's `med_idx` is `unsigned`, so a negative
+    /// `Int` can't be expressed — and converting it would trap. Valid indices come from
+    /// ``CallMediaInfo/index`` (always `>= 0`). An index that is non-negative but past the
+    /// call's media count is *not* this error: pjsua returns a clean `PJ_EINVAL` for it, which
+    /// surfaces as a thrown `PJSUAError`.
+    case invalidMediaIndex(Int)
+
     public var description: String {
         switch self {
         case .unknownAccount(let account):
@@ -25,6 +32,8 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
             return "PJSUAUsageError.callHasNoMediaPort(\(call))"
         case .accountTableFull(let capacity):
             return "PJSUAUsageError.accountTableFull(capacity: \(capacity))"
+        case .invalidMediaIndex(let index):
+            return "PJSUAUsageError.invalidMediaIndex(\(index))"
         }
     }
 }

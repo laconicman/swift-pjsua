@@ -1,7 +1,16 @@
 # `pjsua_acc_add` aborts debug builds when the account table is full
 
-Upstream note for `pjsip/pjproject`. **Status: verified 2026-07-04 — ready to file as a
+Upstream note for `pjsip/pjproject`. **Status: re-verified 2026-07-11 against live master
+`c1ea7648` (2026-07-10) by raw-source read — STILL PRESENT; ready to file as a
 discussion / documentation issue** (behaviour is "by PJLIB convention", as suspected).
+The guard drifted to `pjsua_acc.c:788` (file grew via post-2.16 work: `f40e39f1` acc-del
+rejection, server affinity, `70f8332b` reconnect). **Related upgrade note for us, not for the
+issue:** `f40e39f1` (2026-03-06, in 2.17) fixed a **use-after-free** when deleting an account
+with active calls, adding `pjsua_acc_del2(id, prm)` with `force` (default `PJ_FALSE` →
+`PJ_EBUSY` on active calls). The plain `pjsua_acc_del` **keeps old always-delete behaviour**
+(it sets `force = PJ_TRUE` itself, `pjsua_acc.c:1003`), so our `removeAccount(_:)` is
+behaviour-stable across a bump — but post-bump we should *prefer* `acc_del2(force=false)` and
+surface `PJ_EBUSY`, matching our "hang up first" doc guidance with an enforced check.
 Confirmed on master via DeepWiki deep-mode
 ([conversation](https://deepwiki.com/search/what-is-pjsuamaxacc-can-i-be-o_31d0692b-982d-44fd-986c-a171ce2f052d?mode=deep)):
 guard is `PJ_ASSERT_RETURN(pjsua_var.acc_cnt < PJ_ARRAY_SIZE(pjsua_var.acc), PJ_ETOOMANY)` at

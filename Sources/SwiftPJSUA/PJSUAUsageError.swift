@@ -1,7 +1,7 @@
 /// Errors for misuse of the engine API that are not PJSIP `pj_status_t` failures.
 public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
     /// An operation referenced an account that the engine has no record of (it was not
-    /// created via ``PJSUA/addAccount(id:registrar:username:password:realm:push:makeDefault:)``,
+    /// created via ``PJSUA/addAccount(_:credentials:)``,
     /// or it has since been removed).
     case unknownAccount(AccountID)
 
@@ -10,7 +10,7 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
     /// `.callMediaState` event reports an active audio stream.
     case callHasNoMediaPort(CallID)
 
-    /// ``PJSUA/addAccount(id:registrar:username:password:realm:push:makeDefault:)`` was called
+    /// ``PJSUA/addAccount(_:credentials:)`` was called
     /// with the pjsua account table already full. The table is a fixed array sized
     /// `PJSUA_MAX_ACC` at *binary* build time (4 in the shipped `PJ_CONFIG_IPHONE` build) and
     /// overflowing it is a hard C assert — the engine guards and throws instead. Free a slot
@@ -24,6 +24,11 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
     /// surfaces as a thrown `PJSUAError`.
     case invalidMediaIndex(Int)
 
+    /// An ``AccountConfiguration/transportName`` referenced a transport that
+    /// ``PJSUA/Configuration/transports`` never declared, so there is no
+    /// `pjsua_transport_id` to pin the account to.
+    case unknownTransport(String)
+
     public var description: String {
         switch self {
         case .unknownAccount(let account):
@@ -34,6 +39,8 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
             return "PJSUAUsageError.accountTableFull(capacity: \(capacity))"
         case .invalidMediaIndex(let index):
             return "PJSUAUsageError.invalidMediaIndex(\(index))"
+        case .unknownTransport(let name):
+            return "PJSUAUsageError.unknownTransport(\(name))"
         }
     }
 }

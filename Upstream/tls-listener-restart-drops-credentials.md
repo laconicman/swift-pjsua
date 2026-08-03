@@ -46,6 +46,34 @@ and `pjsip_tls_setting_default()` begins with `pj_memset(tls_opt, 0, sizeof(*tls
 `initial_timeout`. Every credential field — `cert_file`, `privkey_file`, `password`,
 `ca_list_file`, `ciphers`, and the `verify_*` flags — is left zeroed.
 
+The credentials are not merely *left unset* — they are actively destroyed.
+`pjsua_transport_lis_restart()` forwards `&cfg->tls_setting` unconditionally (no emptiness
+guard, unlike the neighbouring `public_addr` handling), and `pjsip_tls_transport_restart2()`
+then does, for a non-`NULL` `opt`:
+
+```c
+if (opt) {
+    pjsip_tls_setting_wipe_keys(&listener->tls_setting);            /* wipe live settings   */
+    pjsip_tls_setting_copy(listener->factory.pool,
+                           &listener->tls_setting, opt);            /* copy the zeroed one  */
+    if (listener->cert) {
+        pj_ssl_cert_wipe_keys(listener->cert);
+        listener->cert = NULL;                                      /* free the live cert   */
+    }
+    if (listener->tls_setting.cert_file.slen ||                     /* all empty for a      */
+        listener->tls_setting.ca_list_file.slen ||                  /* defaulted config, so */
+        listener->tls_setting.ca_list_path.slen ||                  /* nothing is reloaded  */
+        listener->tls_setting.privkey_file.slen)
+    { /* load certificate … */ }
+}
+```
+<sub>`pjsip/src/pjsip/sip_transport_tls.c`</sub>
+
+So the listener ends up with `cert == NULL` and a zeroed `tls_setting`. The wipe is deliberate
+and correct *when the caller supplies new credentials* — the comment even reads "Wipe old
+certificate keys for security". The problem is purely that nothing warns the caller that
+supplying a **defaulted** struct means supplying *no* credentials.
+
 So the obvious sequence for "restart my TLS listener on a new port":
 
 ```c
@@ -84,13 +112,16 @@ only documented way to construct one.
    cfg2.port = 5062;
    pjsua_transport_lis_restart(tp_id, &cfg2);
    ```
-3. The restart succeeds. The listener now has no certificate, no private key and
+3. The restart succeeds. The listener now has `cert == NULL`, a zeroed `tls_setting`, and
    `verify_client == PJ_FALSE`. No warning is emitted.
 
 ### PJSIP version
 
-Verified on current master (`c1ea7648`) by reading `pjsua.h`, `pjsua_core.c` and
-`sip_transport_tls.h`. Not version-specific — the defaulting behaviour is long-standing.
+Verified on current master (`c1ea7648`) by reading the full chain: `pjsua.h` (doc),
+`pjsua_core.c` (`pjsua_transport_config_default`, `pjsua_transport_lis_restart`),
+`sip_transport_tls.h` (`pjsip_tls_setting_default`) and `sip_transport_tls.c`
+(`pjsip_tls_transport_restart2`). Not version-specific — the defaulting behaviour is
+long-standing; `restart2` is the newer path (`5daf06ca`, 2025-10-16).
 
 ### Context
 

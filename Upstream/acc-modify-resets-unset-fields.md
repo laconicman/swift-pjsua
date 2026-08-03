@@ -21,9 +21,16 @@ reset — and that `pjsua_acc_get_config()` is the intended precursor
 
 ### Describe the bug
 
-`pjsua_acc_modify()` applies the supplied `pjsua_acc_config` **wholesale**: every field is taken
-from the struct, so any field the caller did not explicitly carry over is reset to whatever the
-struct holds — typically the value from `pjsua_acc_config_default()`.
+`pjsua_acc_modify()` takes the great majority of its settings **from the supplied
+`pjsua_acc_config`**, so any field the caller did not explicitly carry over is set to whatever
+the struct holds — typically the value from `pjsua_acc_config_default()`. Many are plain
+unconditional assignments (`acc->cfg.user_data = cfg->user_data;`,
+`acc->cfg.publish_opt = cfg->publish_opt;`, `acc->cfg.use_timer = cfg->use_timer;`,
+`acc->cfg.ka_interval = cfg->ka_interval;` …); the sub-structures are deep-copied the same way
+(`pjsua_transport_config_dup(… &cfg->rtp_cfg)`, `pjsua_ice_config_dup`, `pjsua_turn_config_dup`,
+`pjsua_srtp_opt_dup`). A few fields are genuinely preserved (`server_affinity`, for instance, is
+never assigned from `cfg` here), which makes the behaviour harder to reason about from the
+outside, not easier.
 
 The documentation does not say this. The doc comment for `pjsua_acc_modify()`
 (`pjsip/include/pjsua-lib/pjsua.h`) describes the parameter only as *"New account
@@ -35,13 +42,14 @@ The natural reading of "modify" plus a `*_config_default()` initialiser is that 
 fresh config, sets the fields to change, and calls modify. That is the one thing a caller must
 not do. Fields silently lost this way include:
 
-- `server_affinity`
-- `allow_contact_rewrite`, `allow_via_rewrite`
-- `reg_timeout`, `reg_delay_before_refresh`, `reg_retry_interval`,
-  `reg_retry_random_interval`
-- `rtp_cfg.port` (which also resets `next_rtp_port`)
-- `ice_cfg_use` / `turn_cfg_use` (per-account ICE/TURN customisation)
+- `rtp_cfg` in full, including the RTP port range
+- `ice_cfg` / `turn_cfg` (per-account ICE and TURN customisation)
 - `cred_count` / `cred_info`, `proxy_cnt` / `proxy`
+- `srtp_opt`, `rtcp_fb_cfg`
+- registration behaviour: `reg_timeout`, `reg_delay_before_refresh`, `reg_retry_interval`,
+  `reg_retry_random_interval`, `ka_interval`
+- assorted per-account switches: `publish_enabled`, `publish_opt`, `mwi_enabled`,
+  `mwi_expires`, `use_timer`, `use_siprec`, `priority`, `user_data`
 
 The failure mode is quiet: registration continues to work, so nothing looks wrong until a
 setting the application configured once has stopped taking effect — potentially long after, and
@@ -70,8 +78,8 @@ pj_pool_release(tmp);
    pjsua_acc_modify(acc_id, &cfg);
    ```
 3. Read the account config back with `pjsua_acc_get_config()`.
-4. Observe `reg_timeout` is back to `PJSUA_REG_INTERVAL` and `allow_contact_rewrite` is back to
-   `PJ_TRUE`. No warning is logged.
+4. Observe `reg_timeout` is back to `PJSUA_REG_INTERVAL`, and likewise for the other settings
+   listed above. No warning is logged.
 
 ### PJSIP version
 
@@ -108,4 +116,10 @@ where callers start.
 - Found by a config-struct misuse sweep across every pjsua config struct we touch
   ([conversation](https://deepwiki.com/search/misuse-sweep-for-that-same-cla_bb8d7a19-cc1b-44fb-bd24-32dd7d442b8e?mode=deep)),
   which is also where the sibling `pjsua_transport_lis_restart` note came from.
-- Field list above cross-checked against `pjsua_acc_config_default()` on master.
+- **Field list corrected 2026-07-17 by reading `pjsua_acc_modify()` directly.** An earlier draft
+  (taken from the sweep) listed `server_affinity` and `allow_contact_rewrite`; the function is
+  field-by-field rather than a wholesale struct copy, and `server_affinity` is never assigned
+  from `cfg` there, so it is preserved. Only fields verified as unconditional assignments or
+  deep-copies from the supplied config are now listed. Duplicate check: no existing tracker
+  issue for either this or the TLS note (`gh search issues` on `acc_modify`, `acc_get_config`,
+  `tls_transport_restart`, `lis_restart`).

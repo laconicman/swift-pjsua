@@ -199,6 +199,34 @@ applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC
 - Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
   `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.
 
+## TD-20 — RFC 8599 is app-side string work; pjsip implements none of it · open
+Verified 2026-07-26 against local master `4896a5e6a` (grep) and a DeepWiki deep consult
+([conversation](https://deepwiki.com/search/rfc-8599-support-in-pjsippjsua_dbc6e482-8331-4443-b78f-3c5c9a2045ab?mode=deep)):
+**pjsip contains no RFC 8599 code whatsoever.** `pnsreg`, `pnspurr` and `pn-purr` have zero
+occurrences in the tree, and even `pn-provider` appears only in the iOS *sample app*, which
+hand-builds the Contact string. Everything rides on `pjsua_acc_config.reg_contact_uri_params`
+being appended verbatim — which is exactly where our ``PushConfiguration`` writes, so we can
+express all of it, but nothing is parsed *for* us. Three consequences:
+
+1. **`sip.pnsreg` media feature tag (RFC 8599 §8.5)** — presence means "this UA **can** refresh
+   its binding without a push wake-up". A mobile UA that cannot signals by **omitting** it; there
+   is no negative flag. We omit it, which is correct — but by accident, not by decision. Make it
+   explicit in `PushConfiguration` so nobody "helpfully" adds it later.
+2. **The proxy's `sip.pnsreg` feature-capability indicator (§8.4) is never parsed.** Its value is
+   the *minimum seconds before expiry* at which the proxy expects a binding-refresh REGISTER.
+   pjsua schedules refresh purely from the granted `Expires` plus `reg_timeout` /
+   `reg_delay_before_refresh` — neither of which the engine currently exposes. So a push-aware
+   proxy demanding more lead time than our margin will simply not be honoured, silently. Exposing
+   those two account fields is the minimum fix; reading the indicator would need app-side parsing
+   of the 2xx.
+3. **`pn-purr` / `sip.pnspurr` (§6.2.1) — mid-dialog push to a *suspended* UA — is unsupported.**
+   This is the standardised answer to reaching a UA whose dialog is live but whose app is
+   suspended, i.e. one shape of the push-vs-active-socket race
+   (`offhook/docs/Provisioning-Models.md` §B.1). Adopting it is entirely app-side work.
+
+Also confirmed: 423 (Interval Too Brief) handling is generic `Min-Expires` retry with no
+push-awareness — nothing accepts a longer expiry just because the UA is push-capable.
+
 ## TD-19 — a TLS listener restart would silently drop its credentials · open (latent; M2)
 Found by the 2026-07-17 config-struct misuse sweep
 ([conversation](https://deepwiki.com/search/misuse-sweep-for-that-same-cla_bb8d7a19-cc1b-44fb-bd24-32dd7d442b8e?mode=deep)),

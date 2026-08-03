@@ -7,7 +7,25 @@ enough **repro/context** to elaborate later. File only after re-verifying agains
 `master` (our observations are from the pjsip **2.16** binary shipped in `swift-pjsip`;
 DeepWiki deep-mode on `pjsip/pjproject` is the designated verification tool).
 
+## Shipped upstream ✅
+
+| Note | Problem | Outcome |
+|---|---|---|
+| [acc-table-full-asserts-in-debug](acc-table-full-asserts-in-debug.md) | `pjsua_acc_add` used `PJ_ASSERT_RETURN` for a user-input-driven capacity condition → debug builds **abort** where release returns `PJ_ETOOMANY` | issue [#5069](https://github.com/pjsip/pjproject/issues/5069) → PR [#5070](https://github.com/pjsip/pjproject/pull/5070) **merged** (`54ebfdbec`). Local `addAccount` guard kept: older pinned binaries still assert, and it yields a typed error carrying the capacity |
+| [warn-oversized-udp-fallback-issue](warn-oversized-udp-fallback-issue.md) | Oversized request silently falls back to UDP when the §18.1.1 TCP upgrade has no TCP transport to acquire — no log line, docs promise the opposite | issue [#5075](https://github.com/pjsip/pjproject/issues/5075) → PR [#5076](https://github.com/pjsip/pjproject/pull/5076) **merged** (`PJ_PERROR` at the fallback + doc note) |
+
+## Ready to file
+
 | Note | Problem | Local mitigation today | Status |
 |---|---|---|---|
-| [udp-tcp-switch-not-reapplied-on-auth-resend](udp-tcp-switch-not-reapplied-on-auth-resend.md) | Authenticated resend after 401/407 skips the RFC 3261 §18.1.1 UDP→TCP size switch → over-MTU INVITE fragments and dies **silently** — and pjproject's own [TCP-transport doc](https://docs.pjsip.org/en/latest/specific-guides/network_nat/sip_tcp.html#automatic-switch-to-tcp-if-request-is-larger-than-1300-bytes) promises the opposite | engine always opens a TCP listener; callers dial with `;transport=tcp` (TD-16 tracks proxy surface) | **RESOLVED 2026-07-13 — not a code bug.** Switch is reachable/correct on the resend (2.16+master); UDP-only symptom = no TCP transport to switch to (app-side fix is right). Diagnosability gap shipped as docs+logging fork PR [#3](https://github.com/laconicman/pjproject/pull/3). Tracked-issue draft: `warn-oversized-udp-fallback-issue.md`. |
-| [acc-table-full-asserts-in-debug](acc-table-full-asserts-in-debug.md) | `pjsua_acc_add` uses `PJ_ASSERT_RETURN` for a user-input-driven condition → debug builds **abort** where release returns `PJ_ETOOMANY` | engine guards `addAccount` (`pjsua_acc_get_count() < PJSUA_MAX_ACC`, throws) | **re-verified 2026-07-11 vs live master `c1ea7648` — still present (guard now :788); ready to file** as discussion/doc issue (see note header; related: `f40e39f1` changes acc-del semantics for our upgrade) |
+| [acc-modify-resets-unset-fields](acc-modify-resets-unset-fields.md) | `pjsua_acc_modify()` applies the **whole** struct, so fields left at `pjsua_acc_config_default()` values are silently reset (server affinity, contact/via rewrite, reg timers, `rtp_cfg.port`, ICE/TURN use, creds, proxies). Docs never say so, nor point at `pjsua_acc_get_config()` | `reRegister` does read-modify-write (D-CONFIG-4) | **verified 2026-07-17 vs master `c1ea7648`** (doc text read directly) — documentation issue. **This one cost us a real bug** |
+| [tls-listener-restart-drops-credentials](tls-listener-restart-drops-credentials.md) | `pjsua_transport_lis_restart()` takes `tls_setting` from the supplied config, but `pjsua_transport_config_default()` zeroes every cert/key/CA/verify field → restarting a TLS listener from a defaulted struct **silently disables mutual TLS**. The doc actively invites passing a config to update certs | none needed yet — we only `create` transports and ship no TLS | **verified 2026-07-17 vs master `c1ea7648`** (all three sources read) — documentation issue; TD-19. Reached via `pjsua_handle_ip_change`, so it lands on the M2 milestone |
+
+## Closed without filing
+
+| Note | Outcome |
+|---|---|
+| [udp-tcp-switch-not-reapplied-on-auth-resend](udp-tcp-switch-not-reapplied-on-auth-resend.md) | **Root cause disproven — deliberately not filed.** The stateless reuse branch *does* call `stateless_send_resolver_callback` in both 2.16 and master, so the §18.1.1 switch re-runs; both fixes we drafted were unsound. The observed fragmentation was the *no TCP transport to switch to* case, which became #5075 above. Kept with the analysis struck through: the symptom was real, and a future investigation should start from a live transport-level trace |
+
+Not an issue draft: [post-2.16-fixes-impact.md](post-2.16-fixes-impact.md) — the reverse scan of
+upstream fixes since 2.16 and the bump checklist.

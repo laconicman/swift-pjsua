@@ -13,6 +13,7 @@ DeepWiki deep-mode on `pjsip/pjproject` is the designated verification tool).
 |---|---|---|
 | [acc-table-full-asserts-in-debug](acc-table-full-asserts-in-debug.md) | `pjsua_acc_add` used `PJ_ASSERT_RETURN` for a user-input-driven capacity condition → debug builds **abort** where release returns `PJ_ETOOMANY` | issue [#5069](https://github.com/pjsip/pjproject/issues/5069) → PR [#5070](https://github.com/pjsip/pjproject/pull/5070) **merged** (`54ebfdbec`). Local `addAccount` guard kept: older pinned binaries still assert, and it yields a typed error carrying the capacity |
 | [warn-oversized-udp-fallback-issue](warn-oversized-udp-fallback-issue.md) | Oversized request silently falls back to UDP when the §18.1.1 TCP upgrade has no TCP transport to acquire — no log line, docs promise the opposite | issue [#5075](https://github.com/pjsip/pjproject/issues/5075) → PR [#5076](https://github.com/pjsip/pjproject/pull/5076) **merged** (`PJ_PERROR` at the fallback + doc note) |
+| [warn-oversized-udp-fallback-issue](warn-oversized-udp-fallback-issue.md) — *docs follow-up* | The guide page that made the false promise was left unchanged by #5076: it still asserted the 401/407 retry "will be sent with TCP" with no prerequisite, and framed the missing-transport case as an error you *will* see (not emitted on the address-fallback path) | [pjproject_docs#66](https://github.com/pjsip/pjproject_docs/issues/66) → PR [pjproject_docs#67](https://github.com/pjsip/pjproject_docs/pull/67) — **filed 2026-08-04**, Sphinx build verified locally |
 
 ## Ready to file
 

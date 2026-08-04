@@ -24,6 +24,16 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
     /// surfaces as a thrown `PJSUAError`.
     case invalidMediaIndex(Int)
 
+    /// The ``AccountID`` still exists, but it now belongs to a *different* account: the original
+    /// was removed and a new one was added while an operation was suspended, and pjsua recycled
+    /// the id. The operation was abandoned rather than applied to the wrong account. Re-read the
+    /// current account list and retry against the right id.
+    case accountReplaced(AccountID)
+
+    /// Two ``TransportConfiguration`` entries shared a name, so an account could not
+    /// unambiguously pin one of them.
+    case duplicateTransportName(String)
+
     /// A scratch `pj_pool_t` could not be allocated (`pjsua_pool_create` returned `nil`),
     /// so an operation needing one — such as reading an account's live config back before
     /// modifying it — could not proceed. Distinct from ``unknownAccount``: the account is
@@ -45,6 +55,10 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
             return "PJSUAUsageError.accountTableFull(capacity: \(capacity))"
         case .invalidMediaIndex(let index):
             return "PJSUAUsageError.invalidMediaIndex(\(index))"
+        case .accountReplaced(let account):
+            return "PJSUAUsageError.accountReplaced(\(account))"
+        case .duplicateTransportName(let name):
+            return "PJSUAUsageError.duplicateTransportName(\(name))"
         case .poolAllocationFailed:
             return "PJSUAUsageError.poolAllocationFailed"
         case .unknownTransport(let name):

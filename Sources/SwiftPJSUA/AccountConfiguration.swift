@@ -66,4 +66,25 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
     var credentialRequest: CredentialRequest {
         CredentialRequest(accountID: id, username: username, realm: realm)
     }
+
+    // MARK: Codable
+    //
+    // Hand-written `init(from:)` because the synthesised one **ignores property defaults**:
+    // every key becomes mandatory, so a stored document written by an older build — or by hand —
+    // fails to decode outright the moment a field with a default is absent. That would defeat the
+    // point of making this type persistable. `decodeIfPresent` + the same defaults as the
+    // memberwise initialiser means old documents keep decoding as new optional fields are added.
+    // Required keys stay required: an account without `id`, `registrar` or `username` is not a
+    // partially-specified account, it is a broken one.
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        registrar = try container.decode(String.self, forKey: .registrar)
+        username = try container.decode(String.self, forKey: .username)
+        realm = try container.decodeIfPresent(String.self, forKey: .realm) ?? "*"
+        transportName = try container.decodeIfPresent(String.self, forKey: .transportName)
+        push = try container.decodeIfPresent(PushConfiguration.self, forKey: .push)
+        isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? true
+    }
 }

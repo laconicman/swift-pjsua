@@ -1,13 +1,18 @@
 import PJSIP
 
-/// What the engine keeps per account so a silent-push re-REGISTER can rebuild the full
-/// `pjsua_acc_config` without the fragile `pjsua_acc_get_config` + pool dance.
+/// What the engine keeps per account so a silent-push re-REGISTER can re-apply the fields we own
+/// on top of pjsua's live configuration.
 ///
 /// Holds the ``CredentialStore``, **not the secret** — that is fetched on demand each time the
-/// config is rebuilt (TD-11: no plaintext password retained on the Swift side).
+/// config is applied (TD-11: no plaintext password retained on the Swift side).
 struct AccountParameters: Sendable {
     var config: AccountConfiguration
     var credentials: CredentialStore
+
+    /// Distinguishes *this* account from a later one that happened to be handed the same
+    /// ``AccountID``. pjsua recycles freed ids, so an id alone cannot identify an account
+    /// across a suspension point — see ``PJSUA/reRegister(_:updatingPush:)``.
+    var generation: UInt64
 }
 
 extension PJSUA {
@@ -57,7 +62,10 @@ extension PJSUA {
             return accId
         }
         let account = AccountID(rawId)
-        accountParameters[account] = AccountParameters(config: config, credentials: credentials)
+        accountGeneration &+= 1
+        accountParameters[account] = AccountParameters(config: config,
+                                                      credentials: credentials,
+                                                      generation: accountGeneration)
         return account
     }
 
@@ -98,8 +106,14 @@ extension PJSUA {
     }
 
     /// Synchronous tail of ``reRegister(_:updatingPush:)`` — see the note on
-    /// ``addAccount(_:secret:credentials:)``. Re-validates the account, which may have been
-    /// removed while the secret was being fetched.
+    /// ``addAccount(_:secret:credentials:)``.
+    ///
+    /// **Re-validates by generation, not by presence.** Fetching the secret suspends, and the
+    /// actor is re-entrant across that suspension: another call can `removeAccount` and then
+    /// `addAccount` in the gap. pjsua recycles freed ids, so the new account can be handed the
+    /// *same* ``AccountID`` — a `!= nil` check would pass and we would then apply this call's
+    /// credential and push parameters to somebody else's account, and overwrite their stored
+    /// parameters with ours. Comparing the generation stamped at add time closes that window.
     ///
     /// **Read-modify-write, never rebuild.** `pjsua_acc_modify` diffs the struct it is handed
     /// against the *live* config, so passing a freshly-defaulted one silently resets everything
@@ -111,8 +125,11 @@ extension PJSUA {
     private func reRegister(_ account: AccountID,
                             params: AccountParameters,
                             secret: String) throws {
-        guard accountParameters[account] != nil else {
+        guard let live = accountParameters[account] else {
             throw PJSUAUsageError.unknownAccount(account)
+        }
+        guard live.generation == params.generation else {
+            throw PJSUAUsageError.accountReplaced(account)
         }
         guard let pool = pjsua_pool_create("swift-pjsua.accmod", 1024, 1024) else {
             // Not "unknown account" — the guard above already proved it exists. This is an
@@ -133,7 +150,7 @@ extension PJSUA {
             // NOT rolled back (documented pjsua_acc_modify behaviour).
             try pjsua_acc_modify(account.raw, &acc).throwIfFailed()
         }
-        accountParameters[account] = params
+        accountParameters[account] = params   // same generation; only config/push may have changed
         try pjsua_acc_set_registration(account.raw, true.pjBool).throwIfFailed()
     }
 

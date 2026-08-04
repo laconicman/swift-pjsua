@@ -27,4 +27,14 @@ public struct TransportConfiguration: Sendable, Codable, Equatable, Identifiable
         self.kind = kind
         self.port = port ?? kind.defaultPort
     }
+
+    /// Hand-written so an omitted `port` falls back to `kind`'s IANA default, exactly as the
+    /// memberwise initialiser does — the synthesised `init(from:)` would reject the document
+    /// instead. See the note in ``AccountConfiguration``.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        kind = try container.decode(Transport.self, forKey: .kind)
+        port = try container.decodeIfPresent(UInt32.self, forKey: .port) ?? kind.defaultPort
+    }
 }

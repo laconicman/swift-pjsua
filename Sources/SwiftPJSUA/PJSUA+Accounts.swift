@@ -115,28 +115,17 @@ extension PJSUA {
             throw PJSUAUsageError.unknownAccount(account)
         }
         guard let pool = pjsua_pool_create("swift-pjsua.accmod", 1024, 1024) else {
-            throw PJSUAUsageError.unknownAccount(account)
+            // Not "unknown account" — the guard above already proved it exists. This is an
+            // allocation failure, which is transient and worth retrying.
+            throw PJSUAUsageError.poolAllocationFailed
         }
         defer { pj_pool_release(pool) }
 
         var acc = pjsua_acc_config()
         try pjsua_acc_get_config(account.raw, pool, &acc).throwIfFailed()
 
-        // Only our own fields. `pj_str_t` is non-owning, so the backing bytes must outlive the
-        // `pjsua_acc_modify` call below (pjsua copies them during it) — hence the owners array.
-        let secretOwner = PJString(secret)
-        acc.cred_info.0.data = secretOwner.value
-        acc.cred_info.0.data_type = 0 // PJSIP_CRED_DATA_PLAIN_PASSWD
-
-        var owners = [secretOwner]
-        if let push = params.config.push {
-            let pushOwner = PJString(push.params)
-            owners.append(pushOwner)
-            switch push.scope {
-            case .registerOnly: acc.reg_contact_uri_params = pushOwner.value
-            case .allRequests:  acc.contact_uri_params = pushOwner.value
-            }
-        }
+        // Only the fields we own; everything else stays as pjsua has it.
+        let owners = applyOwnedFields(to: &acc, config: params.config, secret: secret)
 
         try withExtendedLifetime(owners) {
             // A changed credential makes pjsua unregister the old binding and re-REGISTER.
@@ -175,12 +164,6 @@ extension PJSUA {
 
         acc.id = idOwner.value
         acc.reg_uri = regOwner.value
-        acc.cred_count = 1
-        acc.cred_info.0.realm = realmOwner.value
-        acc.cred_info.0.scheme = schemeOwner.value
-        acc.cred_info.0.username = userOwner.value
-        acc.cred_info.0.data_type = 0 // PJSIP_CRED_DATA_PLAIN_PASSWD
-        acc.cred_info.0.data = passOwner.value
 
         // Pin the account to a named transport, if it asked for one (TD-18). Precedence in
         // pjsip: transport_id > URI ";transport=" param > stack auto-selection.
@@ -191,8 +174,51 @@ extension PJSUA {
             acc.transport_id = transportID
         }
 
-        var owners: [PJString] = [idOwner, regOwner, realmOwner, schemeOwner, userOwner, passOwner]
+        var owners: [PJString] = [idOwner, regOwner]
+        owners += applyOwnedFields(to: &acc, config: config, secret: secret)
 
+        return try withExtendedLifetime(owners) {
+            try body(&acc)
+        }
+    }
+
+    /// Write the fields this wrapper owns — the digest credential and the RFC 8599 push
+    /// parameters — onto `acc`, returning the ``PJString`` owners whose bytes must outlive the
+    /// following `pjsua_acc_add`/`pjsua_acc_modify` call.
+    ///
+    /// Shared by the **add** path (fresh config) and the **modify** path (live config read back
+    /// via `pjsua_acc_get_config`) deliberately: the two must not drift. In particular the
+    /// push-scope rule below is only correct if it runs on *both* paths.
+    ///
+    /// - Note: **both** contact-parameter slots are always written, even when only one carries a
+    ///   value. On the modify path the struct starts from the *live* config, so leaving the
+    ///   unused slot untouched would keep the previous scope's push string attached — after a
+    ///   `.registerOnly` → `.allRequests` change the account would advertise a stale push token
+    ///   alongside the new one. Clearing works because `pjsua_acc_modify` diffs each field with
+    ///   `pj_strcmp` and then `pj_strdup_with_null`s whatever it was handed, so an empty
+    ///   `pj_str_t` genuinely erases the stored value rather than meaning "no change"
+    ///   (`pjsua_acc.c`, the `reg_contact_uri_params` / `contact_params` blocks).
+    private func applyOwnedFields(to acc: inout pjsua_acc_config,
+                                  config: AccountConfiguration,
+                                  secret: String) -> [PJString] {
+        let realmOwner = PJString(config.realm)
+        let schemeOwner = PJString("digest")
+        let userOwner = PJString(config.username)
+        let passOwner = PJString(secret)
+
+        acc.cred_count = 1
+        acc.cred_info.0.realm = realmOwner.value
+        acc.cred_info.0.scheme = schemeOwner.value
+        acc.cred_info.0.username = userOwner.value
+        acc.cred_info.0.data_type = 0 // PJSIP_CRED_DATA_PLAIN_PASSWD
+        acc.cred_info.0.data = passOwner.value
+
+        var owners = [realmOwner, schemeOwner, userOwner, passOwner]
+
+        // Drive both slots so a scope change (or dropping push entirely) cannot leave the
+        // previous value behind — see the note above.
+        acc.reg_contact_uri_params = pj_str_t()
+        acc.contact_uri_params = pj_str_t()
         if let push = config.push {
             let pushOwner = PJString(push.params)
             owners.append(pushOwner)
@@ -201,9 +227,6 @@ extension PJSUA {
             case .allRequests:  acc.contact_uri_params = pushOwner.value
             }
         }
-
-        return try withExtendedLifetime(owners) {
-            try body(&acc)
-        }
+        return owners
     }
 }

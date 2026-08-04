@@ -24,6 +24,12 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
     /// surfaces as a thrown `PJSUAError`.
     case invalidMediaIndex(Int)
 
+    /// A scratch `pj_pool_t` could not be allocated (`pjsua_pool_create` returned `nil`),
+    /// so an operation needing one — such as reading an account's live config back before
+    /// modifying it — could not proceed. Distinct from ``unknownAccount``: the account is
+    /// fine, the engine is out of memory or not initialised. Typically transient; retry.
+    case poolAllocationFailed
+
     /// An ``AccountConfiguration/transportName`` referenced a transport that
     /// ``PJSUA/Configuration/transports`` never declared, so there is no
     /// `pjsua_transport_id` to pin the account to.
@@ -39,6 +45,8 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
             return "PJSUAUsageError.accountTableFull(capacity: \(capacity))"
         case .invalidMediaIndex(let index):
             return "PJSUAUsageError.invalidMediaIndex(\(index))"
+        case .poolAllocationFailed:
+            return "PJSUAUsageError.poolAllocationFailed"
         case .unknownTransport(let name):
             return "PJSUAUsageError.unknownTransport(\(name))"
         }

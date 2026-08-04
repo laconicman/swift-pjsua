@@ -174,10 +174,6 @@ extension PJSUA {
 
         let idOwner = PJString(config.id)
         let regOwner = PJString(config.registrar)
-        let realmOwner = PJString(config.realm)
-        let schemeOwner = PJString("digest")
-        let userOwner = PJString(config.username)
-        let passOwner = PJString(secret)
 
         acc.id = idOwner.value
         acc.reg_uri = regOwner.value

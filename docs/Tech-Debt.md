@@ -199,6 +199,94 @@ applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC
 - Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
   `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.
 
+## TD-23 — `reRegister` throws `PJSIP_EBUSY` on a *successful* credential rotation · open
+Found 2026-08-04 while researching `offhook/docs/Push-vs-Active-Socket.md` (§1.5). `reRegister`
+ends with
+
+```swift
+try pjsua_acc_modify(account.raw, &acc).throwIfFailed()
+accountParameters[account] = params
+try pjsua_acc_set_registration(account.raw, true.pjBool).throwIfFailed()
+```
+
+but a changed credential makes `pjsua_acc_modify` set `unreg_first` and **call
+`pjsua_acc_set_registration(PJ_TRUE)` itself** (`pjsua_acc.c`, `pjsua_acc_modify()` tail). Our
+trailing call therefore arrives while the regc still has a transaction in flight, and
+`pjsip_regc_send` refuses:
+
+```c
+if (regc->has_tsx) { ... return PJSIP_EBUSY; }   /* pjsip/src/pjsip-ua/sip_reg.c */
+```
+
+So the happy path — rotate the secret, pjsua re-registers — surfaces to the caller as a thrown
+error, while the re-registration proceeds and succeeds behind it. Fix: only issue the trailing
+`set_registration` when `acc_modify` did *not* signal (i.e. when nothing in the §1.1 field table
+changed), or tolerate `PJSIP_EBUSY` there. **Needs a runtime test to confirm the ordering** — the
+analysis is static; `pjsua_acc_modify` returns only after `pjsip_regc_send`, but whether `has_tsx`
+is still set by the time we call depends on transport speed.
+
+## TD-22 — a 439 (First Hop Lacks Outbound Support) would leave us permanently unregistered · open (latent)
+Verified 2026-08-04 against local master `4896a5e6a`. `use_rfc5626` defaults to `PJ_TRUE`, so on
+TCP/TLS pjsua sends `;reg-id` + `Supported: outbound` — exactly the combination RFC 5626 §6
+requires a registrar to answer with **439** when the first hop does not add `Path: <…;ob>`. pjsip
+defines the status code (`sip_msg.h`) and handles it nowhere: it is absent from `regc_cb()`'s
+auto-retry set, `update_rfc5626_status()` only reads the `Require` header of a 2xx, and
+`use_rfc5626` is never downgraded — so every subsequent attempt gets 439 too.
+- Not live: no TLS/TCP deployment yet. Latent the moment we register through someone else's edge
+  proxy.
+- App-side mitigation: on `on_reg_state` code 439, re-apply the config with `use_rfc5626 = false`.
+  Note `use_rfc5626` is an `unreg_first` field, so never mid-call.
+- Upstream note: [`439-first-hop-lacks-outbound-not-handled`](../Upstream/439-first-hop-lacks-outbound-not-handled.md).
+
+## TD-21 — `disable_reg_on_modify` is not a safe "apply config quietly" switch · obligation
+Verified 2026-08-04. The flag suppresses the un-REGISTER and re-REGISTER, but `pjsua_acc_modify()`
+calls `destroy_regc(acc, PJ_TRUE)` **unconditionally** on the `unreg_first` path — which NULLs the
+regc (cancelling its refresh timer), clears `acc->contact` and `reg_mapped_addr`, and resets
+`rfc5626_status`/`rfc5626_flowtmr`. The result: the server keeps a binding we will never refresh,
+and new dialogs get a Contact synthesised by `pjsua_acc_create_uas_contact()` without our
+`contact_uri_params`.
+- **The obligation: the engine must never set `disable_reg_on_modify`** as a way to apply
+  configuration without signalling. The only fields that are genuinely signalling-free are the
+  silent column of `offhook/docs/Push-vs-Active-Socket.md` §1.1.
+- Upstream note: [`acc-modify-disable-reg-still-destroys-regc`](../Upstream/acc-modify-disable-reg-still-destroys-regc.md).
+
+## TD-20 — RFC 8599 is app-side string work; pjsip implements none of it · open
+Verified 2026-07-26 against local master `4896a5e6a` (grep) and a DeepWiki deep consult
+([conversation](https://deepwiki.com/search/rfc-8599-support-in-pjsippjsua_dbc6e482-8331-4443-b78f-3c5c9a2045ab?mode=deep)):
+**pjsip contains no RFC 8599 code whatsoever.** `pnsreg`, `pnspurr` and `pn-purr` have zero
+occurrences in the tree, and even `pn-provider` appears only in the iOS *sample app*, which
+hand-builds the Contact string. Everything rides on `pjsua_acc_config.reg_contact_uri_params`
+being appended verbatim — which is exactly where our ``PushConfiguration`` writes, so we can
+express all of it, but nothing is parsed *for* us. Three consequences:
+
+1. **`sip.pnsreg` media feature tag (RFC 8599 §8.5)** — presence means "this UA **can** refresh
+   its binding without a push wake-up". A mobile UA that cannot signals by **omitting** it; there
+   is no negative flag. We omit it, which is correct — but by accident, not by decision. Make it
+   explicit in `PushConfiguration` so nobody "helpfully" adds it later.
+2. **The proxy's `sip.pnsreg` feature-capability indicator (§8.4) is never parsed.** Its value is
+   the *minimum seconds before expiry* at which the proxy expects a binding-refresh REGISTER.
+   pjsua schedules refresh purely from the granted `Expires` plus `reg_timeout` /
+   `reg_delay_before_refresh` — neither of which the engine currently exposes. So a push-aware
+   proxy demanding more lead time than our margin will simply not be honoured, silently. Exposing
+   those two account fields is the minimum fix; reading the indicator would need app-side parsing
+   of the 2xx.
+3. **`pn-purr` / `sip.pnspurr` (§6.2.1) — mid-dialog push to a *suspended* UA — is unsupported.**
+   This is the standardised answer to reaching a UA whose dialog is live but whose app is
+   suspended, i.e. one shape of the push-vs-active-socket race
+   (`offhook/docs/Provisioning-Models.md` §B.1). Adopting it is entirely app-side work.
+
+Also confirmed: 423 (Interval Too Brief) handling is generic `Min-Expires` retry with no
+push-awareness — nothing accepts a longer expiry just because the UA is push-capable.
+
+**Followed up 2026-08-04** by `offhook/docs/Push-vs-Active-Socket.md` §7, which reads the RFC text
+directly and turns the three consequences above into recommendations: omit `sip.pnsreg`
+deliberately (§7.1); parse the `sip.pnsreg` indicator — noting that its *absence* also matters,
+since RFC 8599 §4.1.4 says a UA "SHOULD only send a binding-refresh REGISTER when it receives a
+push notification" in that case, the opposite of what pjsua's timer does (§7.2); and adopt
+`pn-purr` (§7.3) — which needs a **per-call** contact URI parameter surface, since
+`contact_uri_params` is per-account and per-dialog is what RFC 8599 §6.1.1 requires. Note also that
+RFC 5626 *is* implemented and on by default (§7.4) — see TD-22 for the gap that creates.
+
 ## TD-19 — a TLS listener restart would silently drop its credentials · open (latent; M2)
 Found by the 2026-07-17 config-struct misuse sweep
 ([conversation](https://deepwiki.com/search/misuse-sweep-for-that-same-cla_bb8d7a19-cc1b-44fb-bd24-32dd7d442b8e?mode=deep)),

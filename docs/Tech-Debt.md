@@ -227,7 +227,7 @@ is still set by the time we call depends on transport speed.
 
 ## TD-22 — a 439 (First Hop Lacks Outbound Support) would leave us permanently unregistered · open (latent)
 Verified 2026-08-04 against local master `4896a5e6a`. `use_rfc5626` defaults to `PJ_TRUE`, so on
-TCP/TLS pjsua sends `;reg-id` + `Supported: outbound` — exactly the combination RFC 5626 §5.3
+TCP/TLS pjsua sends `;reg-id` + `Supported: outbound` — exactly the combination RFC 5626 §6
 requires a registrar to answer with **439** when the first hop does not add `Path: <…;ob>`. pjsip
 defines the status code (`sip_msg.h`) and handles it nowhere: it is absent from `regc_cb()`'s
 auto-retry set, `update_rfc5626_status()` only reads the `Require` header of a 2xx, and

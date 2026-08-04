@@ -72,8 +72,19 @@ static pj_status_t destroy_regc(pjsua_acc *acc, pj_bool_t force)
 ```
 <sub>`pjsip/src/pjsua-lib/pjsua_acc.c`</sub>
 
-`pjsip_regc_destroy2()` in turn cancels the regc's own refresh timer
-(`pjsip_endpt_cancel_timer(regc->endpt, &regc->timer)`, `pjsip/src/pjsip-ua/sip_reg.c`).
+`pjsip_regc_destroy2()` in turn cancels the regc's own refresh timer. Note that with
+`disable_reg_on_modify` set there is no un-REGISTER, so `regc->has_tsx` is false and `destroy2`
+takes its immediate-teardown branch — the one that runs
+
+```c
+if (regc->timer.id != 0) {
+    pjsip_endpt_cancel_timer(regc->endpt, &regc->timer);
+    regc->timer.id = 0;
+}
+```
+<sub>`pjsip/src/pjsip-ua/sip_reg.c`, `pjsip_regc_destroy2()`</sub>
+
+— so the refresh timer is gone the moment `pjsua_acc_modify()` returns.
 
 So after
 

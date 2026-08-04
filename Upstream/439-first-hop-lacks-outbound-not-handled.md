@@ -28,7 +28,7 @@ unregistered with no retry and no non-outbound fallback
 >
 > <sub>`pjsip/include/pjsua-lib/pjsua.h`</sub>
 
-For a TCP or TLS account, pjsua therefore sends exactly the combination RFC 5626 §5.3 names as the
+For a TCP or TLS account, pjsua therefore sends exactly the combination RFC 5626 §6 names as the
 439 trigger — a `reg-id` Contact parameter plus the `outbound` option tag in `Supported`:
 
 ```c
@@ -53,7 +53,7 @@ if (need_outbound) {
 }
 ```
 
-RFC 5626 §5.3 makes the registrar's side mandatory:
+RFC 5626 §6 (Registrar Procedures) makes the registrar's side mandatory:
 
 > *"if the REGISTER request contains the reg-id and the outbound option tag in a Supported header
 > field, then the registrar MUST respond to the REGISTER request with a 439 (First Hop Lacks

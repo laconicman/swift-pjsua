@@ -48,21 +48,21 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .unknownAccount(let account):
-            return "PJSUAUsageError.unknownAccount(\(account))"
+            "PJSUAUsageError.unknownAccount(\(account))"
         case .callHasNoMediaPort(let call):
-            return "PJSUAUsageError.callHasNoMediaPort(\(call))"
+            "PJSUAUsageError.callHasNoMediaPort(\(call))"
         case .accountTableFull(let capacity):
-            return "PJSUAUsageError.accountTableFull(capacity: \(capacity))"
+            "PJSUAUsageError.accountTableFull(capacity: \(capacity))"
         case .invalidMediaIndex(let index):
-            return "PJSUAUsageError.invalidMediaIndex(\(index))"
+            "PJSUAUsageError.invalidMediaIndex(\(index))"
         case .accountReplaced(let account):
-            return "PJSUAUsageError.accountReplaced(\(account))"
+            "PJSUAUsageError.accountReplaced(\(account))"
         case .duplicateTransportName(let name):
-            return "PJSUAUsageError.duplicateTransportName(\(name))"
+            "PJSUAUsageError.duplicateTransportName(\(name))"
         case .poolAllocationFailed:
-            return "PJSUAUsageError.poolAllocationFailed"
+            "PJSUAUsageError.poolAllocationFailed"
         case .unknownTransport(let name):
-            return "PJSUAUsageError.unknownTransport(\(name))"
+            "PJSUAUsageError.unknownTransport(\(name))"
         }
     }
 }

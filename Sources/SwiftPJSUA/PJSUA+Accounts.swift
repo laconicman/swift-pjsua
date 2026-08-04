@@ -144,7 +144,7 @@ extension PJSUA {
         // Only the fields we own; everything else stays as pjsua has it.
         let owners = applyOwnedFields(to: &acc, config: params.config, secret: secret)
 
-        try withExtendedLifetime(owners) {
+        _ = try withExtendedLifetime(owners) {
             // A changed credential makes pjsua unregister the old binding and re-REGISTER.
             // If that re-registration fails the account stays unregistered and the config is
             // NOT rolled back (documented pjsua_acc_modify behaviour).

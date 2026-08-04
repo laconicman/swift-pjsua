@@ -79,11 +79,27 @@ public final class CallKitController: NSObject, CXProviderDelegate {
     }
 
     public func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
+        // Configure — do NOT activate — the audio session before dialing; activation arrives via
+        // didActivate after the system elevates the session's priority (design §5; Apple's
+        // "Making and receiving VoIP calls").
+        configureAudioSession(video: action.isVideo)
         Task { await router.startCall(action) }
     }
 
     public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
+        // Answer configures for voice; a video upgrade re-configures app-side when rendering
+        // lands (TD-6 era).
+        configureAudioSession(video: false)
         Task { await router.answerCall(action) }
+    }
+
+    /// Category/mode configuration only (design §5): CallKit owns activation; the engine opens
+    /// the device on `didActivate`.
+    private func configureAudioSession(video: Bool) {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord,
+                                 mode: video ? .videoChat : .voiceChat,
+                                 options: [.allowBluetoothHFP])
     }
 
     public func provider(_ provider: CXProvider, perform action: CXEndCallAction) {

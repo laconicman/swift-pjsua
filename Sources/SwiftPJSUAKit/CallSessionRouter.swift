@@ -30,6 +30,18 @@ public actor CallSessionRouter {
     /// a `CXStartCallAction` arriving while it is `nil` fails (nowhere to place the call from).
     private var outgoingAccount: AccountID?
 
+    /// App-facing relay of `.registrationState` events. The router consumes the engine stream
+    /// **exclusively** (it is single-consumer), and registration has no CallKit mapping (§3) —
+    /// so the app's account UI observes it here instead of reading `engine.events` itself.
+    ///
+    /// `@MainActor` by type, so the closure body runs on the main actor: the app updates UI
+    /// directly, with no risk of an off-main mutation and no manual hop to remember. The router
+    /// `await`s the main-actor hop when it fires (see `handle`).
+    public typealias RegistrationObserver = @MainActor @Sendable (AccountID, _ active: Bool,
+                                                                  _ statusCode: Int32,
+                                                                  _ expiration: UInt32) -> Void
+    private var registrationObserver: RegistrationObserver?
+
     /// Connection-establishing / hold actions awaiting the engine event that resolves them.
     /// Keyed by CallKit `UUID`; at most one outstanding per call in this skeleton (answer→hold are
     /// temporally exclusive). See ``PendingCallAction``.
@@ -91,6 +103,12 @@ public actor CallSessionRouter {
     /// account; `nil` disables outgoing calls.
     public func setOutgoingAccount(_ account: AccountID?) {
         outgoingAccount = account
+    }
+
+    /// Set (or clear) the app's registration observer. The closure is `@MainActor`, so it runs
+    /// on the main actor — update UI directly; no manual thread hop needed.
+    public func setRegistrationObserver(_ observer: RegistrationObserver?) {
+        registrationObserver = observer
     }
 
     // MARK: Incoming report (push or socket)
@@ -278,9 +296,9 @@ public actor CallSessionRouter {
         case let .callMediaState(call, media):
             handleMediaState(call: call, media: media)
 
-        case .registrationState:
-            // Registration is surfaced for the app's account UI; no CallKit mapping here.
-            break
+        case let .registrationState(account, active, statusCode, expiration):
+            // No CallKit mapping (§3) — relay to the app's account UI on the main actor.
+            await registrationObserver?(account, active, statusCode, expiration)
         }
     }
 

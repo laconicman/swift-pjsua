@@ -29,19 +29,48 @@ public actor PJSUA {
     enum State { case idle, running, stopped }
     private(set) var state: State = .idle
 
-    /// Parameters of accounts added via ``addAccount(_:)``, kept so a silent-push
-    /// re-REGISTER can rebuild the full account config with updated push parameters
-    /// without the fragile `pjsua_acc_get_config` + pool dance. See `PJSUA+Accounts.swift`.
+    /// Parameters of accounts added via ``addAccount(_:credentials:)``, kept so a silent-push
+    /// re-REGISTER can re-apply the fields we own on top of pjsua's live config. See
+    /// `PJSUA+Accounts.swift`.
     var accountParameters: [AccountID: AccountParameters] = [:]
+
+    /// Monotonic stamp handed to each added account. pjsua recycles freed account ids, so this
+    /// is what lets a suspended operation tell "my account" from "a different account that was
+    /// given my id while I was awaiting".
+    var accountGeneration: UInt64 = 0
+
+    /// Transport ids handed back by `pjsua_transport_create`, keyed by
+    /// ``TransportConfiguration/name`` so an account can pin one without persisting a runtime id.
+    var transportIDs: [String: pjsua_transport_id] = [:]
 
     /// Engine configuration. Note `thread_cnt` is intentionally *not* exposed: the design
     /// requires pjsua's worker threads to pump events, so it is pinned inside ``start(_:)``.
-    public struct Configuration: Sendable {
-        public var port: UInt32 = 5060
-        public var transport: Transport = .udp
+    public struct Configuration: Sendable, Codable, Equatable {
+        /// Transports to create at ``start(_:)``, in order. Replaces the former single
+        /// `port`/`transport` pair, which could not express a per-transport port (TD-18).
+        ///
+        /// The default makes explicit what `start()` used to do implicitly: a UDP primary plus a
+        /// TCP listener, because pjsip's RFC 3261 §18.1.1 size switch can only upgrade an
+        /// oversized request to TCP if a TCP transport exists (see `Upstream/` and
+        /// pjsip/pjproject#5075).
+        public var transports: [TransportConfiguration] = [.init("udp", .udp), .init("tcp", .tcp)]
         public var logLevel: UInt32 = 4
         public var userAgent: String = "swift-pjsua"
         public init() {}
+
+        /// Hand-written for the same reason as ``AccountConfiguration``: the synthesised
+        /// `init(from:)` ignores property defaults, so **every** key would be mandatory and a
+        /// document omitting any of them would fail to decode. Here that matters most — a
+        /// config persisted before `transports` existed should still load.
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            transports = try container.decodeIfPresent([TransportConfiguration].self,
+                                                       forKey: .transports)
+                ?? [.init("udp", .udp), .init("tcp", .tcp)]
+            logLevel = try container.decodeIfPresent(UInt32.self, forKey: .logLevel) ?? 4
+            userAgent = try container.decodeIfPresent(String.self, forKey: .userAgent)
+                ?? "swift-pjsua"
+        }
     }
 
     public init() {
@@ -90,12 +119,26 @@ public actor PJSUA {
 
         try pjsua_init(&cfg, &log, &media).throwIfFailed()
 
-        // 3. transport
-        var tcfg = pjsua_transport_config()
-        pjsua_transport_config_default(&tcfg)
-        tcfg.port = config.port
-        var transportId: pjsua_transport_id = -1 // PJSUA_INVALID_ID
-        try pjsua_transport_create(config.transport.pjType, &tcfg, &transportId).throwIfFailed()
+        // 3. transport(s) — one per TransportConfiguration, remembered by name so an account can
+        // pin itself to one (`AccountConfiguration.transportName` → `acc_config.transport_id`).
+        // Ports live here, never on the account: pjsua has no per-account port.
+        for transport in config.transports {
+            // Names are the only handle an account has on a transport, so a duplicate would
+            // silently make one of them unreachable. Refuse rather than pick a winner.
+            guard transportIDs[transport.name] == nil else {
+                throw PJSUAUsageError.duplicateTransportName(transport.name)
+            }
+            var tcfg = pjsua_transport_config()
+            pjsua_transport_config_default(&tcfg)
+            tcfg.port = transport.port
+            var transportId: pjsua_transport_id = -1 // PJSUA_INVALID_ID
+            try pjsua_transport_create(transport.kind.pjType, &tcfg, &transportId).throwIfFailed()
+            transportIDs[transport.name] = transportId
+        }
+
+        // Fail-fast is deliberate for a debug engine: if a listener cannot bind, `start()`
+        // throws rather than continuing silently — a missing TCP transport disables the §18.1.1
+        // upgrade. A production build may prefer best-effort (log and carry on). See TD-18.
 
         // 4. go
         try pjsua_start().throwIfFailed()
@@ -108,6 +151,10 @@ public actor PJSUA {
             pjsua_destroy()
         }
         state = .stopped
+        // pjsua_destroy() invalidated every transport id; drop the stale name -> id map so a
+        // later start() cannot resolve a transportName to a dead transport.
+        transportIDs.removeAll()
+        accountParameters.removeAll()
         finishPJSUAEventStream()
         executor.stop()
     }

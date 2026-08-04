@@ -21,6 +21,29 @@ import PJSIP
 // Reading call info (`pjsua_call_get_info`) and wiring media (`pjsua_conf_connect`) is
 // fine — those are non-blocking and must run on this registered worker thread.
 //
+// ### Why that discipline is load-bearing (validated against pjproject master, 2026-07-17)
+//
+// A deep source review confirmed G2 is not merely tidy — some of these callbacks run with
+// pjsua's own locks **held**, so a synchronous re-entry would deadlock rather than misbehave:
+//
+//   held under PJSUA_LOCK  : on_reg_state, on_reg_state2, on_ip_change_progress,
+//                            on_incoming_call
+//   no PJSUA_LOCK, but the dialog/tsx grp_lock is held upstream:
+//                            on_call_state, on_call_tsx_terminate_session, on_mwi_state,
+//                            on_auth_challenge
+//
+// Documented lock order is PJSUA_LOCK > dialog grp_lock > tsx grp_lock, so calling *up* that
+// order from inside a callback is an ABBA inversion. `on_call_tsx_terminate_session`'s own
+// header says the app MUST NOT call any API acquiring a higher-order lock from within it.
+//
+// Forward note for the credential work: `on_auth_challenge` (PJSIP 2.17+) is invoked with the
+// tsx grp_lock held and must NOT acquire PJSUA_LOCK. If we adopt it to supply secrets on demand
+// (see docs/Configuration-Design.md §4), the fetch must use its **async/deferred** path —
+// `pjsip_auth_clt_async_send_req` after the secret arrives — never a synchronous Keychain read
+// inside the callback.
+//
+// Full findings: docs/Threading-Validation.md.
+//
 // `nonisolated(unsafe)` invariant: written exactly once via ``makePJSUAEventStream()`` in
 // `PJSUA.init`, before `pjsua_start()` can fire any callback; read-only thereafter.
 // `AsyncStream.Continuation` is `Sendable` and its `yield` is thread-safe, so yielding

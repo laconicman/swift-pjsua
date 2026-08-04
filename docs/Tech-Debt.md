@@ -109,7 +109,15 @@ late) to skip a redundant CallKit report — directly useful for the dual-mode n
 Tracked as a `// TODO` in `VoIPPushHandler`; too new for the iOS 17 floor.
 - Refs: <https://developer.apple.com/documentation/pushkit/pkpushregistrydelegate>.
 
-## TD-11 — account credentials live in engine-actor memory · open
+## TD-11 — account credentials live in engine-actor memory · **partly discharged 2026-07-17**
+The Swift-side copy is gone: `AccountParameters` now retains a ``CredentialStore`` and the secret
+is fetched on demand at `addAccount`/`reRegister` (see `docs/Configuration-Design.md` §4, §6).
+**Still open:** pjsua itself deep-copies the credential into the account pool *and* the shared
+auth session, alive until `pjsua_acc_del` and never zeroed (`pj_pool_t` is a bump allocator with
+no scrub API). Removing that needs `cred_count = 0` plus the `on_auth_challenge` hook, which is
+**PJSIP 2.17+** (`db3cfdee`) — gated on the version bump. Original entry follows.
+
+
 `reRegister(_:updatingPush:)` rebuilds the account config from `AccountParameters` retained in the
 `PJSUA` actor — which includes the SIP **password** in plaintext in process memory. Acceptable for a
 skeleton, but a production app should hold credentials in the Keychain and supply them to the engine
@@ -191,7 +199,33 @@ applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC
 - Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
   `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.
 
-## TD-18 — transport port model is a Phase-0 simplification · open (found via PR #7 review)
+## TD-19 — a TLS listener restart would silently drop its credentials · open (latent; M2)
+Found by the 2026-07-17 config-struct misuse sweep
+([conversation](https://deepwiki.com/search/misuse-sweep-for-that-same-cla_bb8d7a19-cc1b-44fb-bd24-32dd7d442b8e?mode=deep)),
+the same bug class as D-CONFIG-4. `pjsua_transport_lis_restart()` is a **modify-style** API that
+consumes `pjsua_transport_config` including `tls_setting` — and
+`pjsua_transport_config_default()` zeroes every TLS credential field (`cert_file`,
+`privkey_file`, `password`, `ciphers`). Restarting a TLS listener with a freshly-defaulted struct
+therefore **silently disables mutual TLS**.
+- **Not a bug today:** `start()` only ever calls `pjsua_transport_create` (create-style, where a
+  fresh default is correct), and we ship no TLS transport yet.
+- **Why it is queued rather than ignored:** the M2 IP-change milestone calls
+  `pjsua_handle_ip_change()`, which internally restarts every registered listener — including
+  `pjsip_tls_transport_restart`. Whoever adds TLS + IP-change must carry the live `tls_setting`
+  across the restart (save our own copy or read it back), not rebuild it.
+- Refs: capability map "IP/network-change" (M2); `pjsua_transport_lis_restart` docs;
+  `docs/Configuration-Design.md` D-CONFIG-4 for the general rule.
+
+## TD-18 — transport port model · **discharged 2026-07-17** (fail-fast note still stands)
+`Configuration.transports: [TransportConfiguration]` gives each transport its own kind and port
+(IANA default per kind), and `AccountConfiguration.transportName` pins an account to one via
+`acc_config.transport_id` — so the "single shared port" simplification is gone. Two caveats now
+live on the API rather than here: a pin/URI mismatch is a hard `PJSIP_ETPNOTSUITABLE` error, and
+pinning **UDP** disables the §18.1.1 upgrade (re-creating #5075) — pin TCP or leave it `nil`.
+**Still deliberate:** fail-fast if a listener cannot bind (a production build may prefer
+best-effort). Original entry follows.
+
+
 `start()` opens the primary transport on `config.port` and, for a UDP primary, a **TCP listener
 on the same port** (TD-16 mitigation). Two simplifications are deliberate for now and should be
 lifted before Phase 2's per-account transport policy:

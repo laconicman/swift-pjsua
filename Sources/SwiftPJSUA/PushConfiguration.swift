@@ -8,9 +8,9 @@ import PJSIP
 /// deliberately a **raw string** here: deviated scenarios (e.g. a silent-push topic that
 /// drops the `.voip` suffix and carries a regular APNs device token) just pass a different
 /// string. Use ``apns(teamID:bundleID:token:pushType:scope:)`` for the common case.
-public struct PushConfiguration: Sendable, Equatable {
+public struct PushConfiguration: Sendable, Codable, Equatable {
     /// Which outgoing messages carry the parameters.
-    public enum Scope: Sendable, Equatable {
+    public enum Scope: Sendable, Codable, Equatable {
         /// Attach to REGISTER only (`pjsua_acc_config.reg_contact_uri_params`). Most apps.
         case registerOnly
         /// Attach to all requests (`pjsua_acc_config.contact_uri_params`).

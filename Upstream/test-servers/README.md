@@ -22,9 +22,10 @@ connection with a new Call-ID, i.e. a second call. Both are why these exist.
 |---|---|---|
 | `run-439-test.sh` | TCP; 439 to any REGISTER advertising outbound, 200 otherwise | 2 REGISTERs — the retry drops `;ob`, `;reg-id`, `;+sip.instance` and the `Supported: outbound, path` header, and is accepted |
 | `run-439-udp-test.sh` | UDP; 439 to everything | 1 REGISTER — a UDP account never advertises outbound, so a 439 is non-conformant and must be ignored |
+| `run-regparams-test.sh` | TCP; 200 **without** `Require: outbound`, account configured with REGISTER-only push params | Refresh drops `reg-id`/`+sip.instance` but keeps `pn-provider` (URI param) and `pn-prid` (header param) — needs pjsua built with `--reg-contact-params` / `--reg-contact-uri-params` |
 | `run-failover-test.sh` | TCP; 200 **without** `Require: outbound`, then 439 to the refresh | 3 REGISTERs — the refresh still carries `reg-id` even though `rfc5626_status` has gone `OUTBOUND_NA`, so the 439 must still trigger the fallback |
 
-The third is the subtle one. `update_rfc5626_status()` drops the status on a 200
+`run-failover-test.sh` is the subtle one. `update_rfc5626_status()` drops the status on a 200
 lacking `Require: outbound` and rewrites `acc->reg_contact`, but never calls
 `pjsip_regc_update_contact()` — so the regc keeps sending the original reg-id
 Contact. A fix gated on `rfc5626_status` looks right and silently leaves the
@@ -56,5 +57,20 @@ the pairing is what makes a failure diagnosable.
   dependencies, so editing `pjsua_internal.h` and rebuilding incrementally
   leaves objects compiled against two different `struct pjsua_acc` layouts —
   which corrupts memory shortly after account setup rather than failing loudly.
+- **Switching branches does not rebuild the libraries.** `make pjsua` relinks
+  against whatever `libpjsua.a` happens to be on disk, so checking out a branch
+  and rebuilding only the app silently tests the *previous* branch's library.
+  Rebuild `pjsip/build` after every checkout, and check the timestamps if a
+  result looks impossible — a "baseline" run that already shows the fix is the
+  giveaway.
 - Registrar stdout is line-buffered (`setvbuf`) so output survives the script
   killing the process at the end of a run.
+
+## `run-regparams-test.sh` needs a patched pjsua
+
+The REGISTER-only Contact parameters (`reg_contact_params`,
+`reg_contact_uri_params` — where RFC 8599 push parameters live) exist in
+`pjsua_acc_config` but the stock sample app exposes no way to set them. That is
+why a change dropping them from re-registrations was reviewable only by
+argument, not by test. The two options were added upstream-side; until that
+lands, this script needs a pjsua built from that branch.

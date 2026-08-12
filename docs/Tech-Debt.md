@@ -93,7 +93,35 @@ the executor and pure-logic types **cannot be unit-tested headlessly on a Mac/Li
 target transitively imports the iOS-only framework, so tests run only on the iOS Simulator. A macOS
 slice (in `swift-pjsip` first, then here) would unlock headless executor tests; deferred to a
 dedicated session.
-- Refs: roadmap §6 (G15 resolution).
+
+**What the macOS slice inherits from pjmedia's CoreAudio backend.** Read before designing any Mac
+audio UI — `coreaudio_dev.m` behaves materially differently on macOS than on iOS once EC is on,
+because EC *is* the VoiceProcessingIO (VPIO) unit. Verified against pjproject master `b8b988b02`
+on 2026-08-11:
+
+- **Device selection is ignored whenever VPIO is active.** `create_audio_unit()` sets
+  `kAudioOutputUnitProperty_CurrentDevice` only in the `!ec_enabled` branch (setting it under VPIO
+  makes the later buffer-size query fail with `kAudioUnitErr_InvalidProperty`). So on macOS you get
+  EC **or** a working device picker, not both — the call runs on the system default in/out. This is
+  a product decision for a Mac softphone, where users expect to choose a mic, not a bug to work
+  around.
+- **The warning under-reports it.** The `"audio device id settings are ignored when using VPIO"`
+  log fires only when `rec_id` **and** `play_id` are *both* non-default. Set just one — a specific
+  mic, default speaker — and the choice is silently dropped with no log line at all.
+- **Stereo silently turns EC off.** `ca_factory_create_stream()` forces `ec_enabled = PJ_FALSE`
+  when `channel_count > 1` on Mac ("temporarily disabled … due to recording sound artefacts"). Any
+  Mac path that asks for stereo capture gets no VPIO — and therefore none of the VPIO-conditional
+  behaviour above or below.
+- **Deployment floor decides which OS-version guards bite.** pjmedia gates macOS 14 / iOS 17 API
+  behind an SDK check plus a runtime `@available`. Target macOS 14+ and the runtime check is always
+  true; target 12/13 and the feature silently no-ops. First live instance: the configurable VPIO
+  other-audio ducking we contributed upstream ([#5178](https://github.com/pjsip/pjproject/pull/5178),
+  filed 2026-08-11) — with a macOS 14+ floor a Mac slice picks up voice-activity-driven ducking for
+  free; below it, calls keep the old whole-call duck. See
+  [`Upstream/coreaudio-vpio-other-audio-ducking.md`](../Upstream/coreaudio-vpio-other-audio-ducking.md).
+
+- Refs: roadmap §6 (G15 resolution), §6.3 (audio-device API);
+  `TASK-code-swift-pjsip-macos-slice.md` §5.
 
 ## TD-9 — `on_reg_state2` diagnostics are minimal · open
 The registration callback surfaces `active` / `statusCode` / `expiration` but **not** the SIP reason
@@ -198,6 +226,34 @@ applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC
   want per-call timeouts instead of a global.
 - Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
   `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.
+
+## TD-24 — a socket the OS killed during suspension is discovered late, not on resume · open (iOS)
+Raised by Pavel 2026-08-04, and the sharp edge under `Push-vs-Active-Socket.md` §5. When iOS
+suspends the app it reclaims the TCP/TLS connection, but **pjsip has no resume hook**: it learns
+the socket is dead only *reactively* — when a send fails, or when the transport keep-alive timer
+(`PJSIP_TCP_KEEP_ALIVE_INTERVAL` / TLS equivalent, **90 s**) next fires, and timers do not run
+while suspended so that check is itself late.
+`pjsua_acc_on_tp_state_changed` handles `PJSIP_TP_STATE_DISCONNECTED` *after the fact*.
+
+The window between resume and discovery is the hazard: pjsip believes it has a transport,
+`rfc5626_status` may still read `OUTBOUND_ACTIVE`, and the account looks registered — so the app
+reports itself reachable, and an outgoing REGISTER or INVITE goes into a black hole until the
+stack notices. On a push wake this is exactly the wrong moment to be optimistic.
+
+**Design rule this implies (not yet implemented):** on foreground/resume the engine must treat any
+connection-oriented transport as **presumed stale** and re-validate proactively rather than trust
+its own state — shut the transport down and re-register, rather than waiting for a failure. pjsua's
+sanctioned hammer for "everything may have changed" is `pjsua_handle_ip_change()` (with
+`shutdown_transport`), which is the M2 milestone; a lighter targeted operation may be preferable
+for the plain suspend/resume case, since nothing about the IP necessarily changed.
+
+- **Verified:** the reactive-only nature of the transport-state callback and the keep-alive
+  intervals (read in the fork at `4896a5e6a`; see `Push-vs-Active-Socket.md` §5).
+- **Not verified — wants a device test:** how long detection actually takes after resume, whether
+  a queued send fails fast or hangs to transaction timeout, and whether UDP's NAT binding shows the
+  same class of false confidence (no connection state, so probably a different failure shape).
+- Relates: TD-19 (a TLS listener restart drops its credentials — the M2 path that would do this
+  re-validation), TD-22 (439), `Push-vs-Active-Socket.md` §5.
 
 ## TD-23 — `reRegister` throws `PJSIP_EBUSY` on a *successful* credential rotation · open
 Found 2026-08-04 while researching `offhook/docs/Push-vs-Active-Socket.md` (§1.5). `reRegister`

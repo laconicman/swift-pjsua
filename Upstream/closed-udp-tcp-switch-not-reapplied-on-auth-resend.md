@@ -9,7 +9,7 @@ pjsip is behaving reasonably for a UDP-only app; our app-side fix (TCP listener 
 is correct. The one real gap was **diagnosability** (silent, undocumented fallback), addressed by
 fork PR [laconicman/pjproject#3](https://github.com/laconicman/pjproject/pull/3) (`PJ_LOG(5)` at
 the fallback + a `PJSIP_UDP_SIZE_THRESHOLD` doc note; DeepWiki-reviewed, compiled vs 2.17).
-Tracked-issue draft for that PR: `Upstream/warn-oversized-udp-fallback-issue.md`.
+Tracked-issue draft for that PR: `Upstream/pjproject-5076-warn-oversized-udp-fallback.md`.
 
 <details><summary>Superseded root-cause analysis (falsified — kept for the record)</summary>
 

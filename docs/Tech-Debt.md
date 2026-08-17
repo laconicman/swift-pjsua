@@ -116,12 +116,21 @@ on 2026-08-11:
   behind an SDK check plus a runtime `@available`. Target macOS 14+ and the runtime check is always
   true; target 12/13 and the feature silently no-ops. First live instance: the configurable VPIO
   other-audio ducking we contributed upstream ([#5178](https://github.com/pjsip/pjproject/pull/5178),
-  filed 2026-08-11) — with a macOS 14+ floor a Mac slice picks up voice-activity-driven ducking for
-  free; below it, calls keep the old whole-call duck. See
-  [`Upstream/coreaudio-vpio-other-audio-ducking.md`](../Upstream/coreaudio-vpio-other-audio-ducking.md).
+  filed 2026-08-11) — with a macOS 14+ floor a Mac slice can have voice-activity-driven ducking;
+  below it, calls keep the old whole-call duck. See
+  [`Upstream/pjproject-5178-coreaudio-vpio-other-audio-ducking.md`](../Upstream/pjproject-5178-coreaudio-vpio-other-audio-ducking.md).
+- **Nothing Apple-specific arrives by default — we must ask for it.** At the maintainer's request
+  #5178 (merged 2026-08-17) ships with `PJMEDIA_AUDIO_DEV_COREAUDIO_ADVANCED_DUCKING` defaulting
+  to `0`, switched on upstream only inside `config_site_sample.h`'s `PJ_CONFIG_IPHONE` block —
+  which is **iOS-only**, and confirmed deliberate ("I suppose we can leave MacOS as it is").
+  That is not a one-off: macOS configures the CoreAudio backend through `aconfigure`'s `*darwin*`
+  branch while iOS configures it through `config_site.h`, so anything upstream enables "for Apple"
+  by way of `PJ_CONFIG_IPHONE` misses a Mac slice entirely. The fix is structural, and it lives in
+  `swift-pjsip`: set feature macros explicitly per slice in its `scripts/config_site.h` rather than
+  inheriting upstream defaults. See `swift-pjsip/docs/ARCHITECTURE.md` §11.
 
 - Refs: roadmap §6 (G15 resolution), §6.3 (audio-device API);
-  `TASK-code-swift-pjsip-macos-slice.md` §5.
+  `TASK-code-swift-pjsip-macos-slice.md` §5; `swift-pjsip/docs/ARCHITECTURE.md` §11.
 
 ## TD-9 — `on_reg_state2` diagnostics are minimal · open
 The registration callback surfaces `active` / `statusCode` / `expiration` but **not** the SIP reason
@@ -227,6 +236,26 @@ applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC
 - Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
   `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.
 
+## TD-25 — `pjsip_regc` is mostly mutable in place; our mental model of `acc_modify` was too coarse · open (informational)
+From a DeepWiki deep consult 2026-08-17, verified against `sip_regc.h` / `sip_reg.c`. Only **five**
+pieces of `pjsip_regc` state have no public setter and therefore genuinely force a rebuild:
+**registrar/target URI, From, To, Call-ID, CSeq** (plus header *removal*, since
+`pjsip_regc_add_headers()` is additive-only — the `pj_list_init` reset is commented out at
+`sip_reg.c:544-545`). Contact list, expiry, route set, credentials, auth session/prefs, transport
+selector and Via sent-by all have setters (`pjsip_regc_update_contact`, `_update_expires`,
+`_set_route_set`, `_set_credentials`, `_set_auth_sess`, `_set_prefs`, `_set_transport`,
+`_set_via_sent_by`).
+
+Cross-referenced against the `unreg_first` table in `offhook/docs/Push-vs-Active-Socket.md` §1.1,
+this means pjsua tears the regc down for many changes that would not require it — including a bare
+credential rotation and a push-parameter change, our two most likely Model-B updates.
+- **Not actionable in the engine today** — we do not drive `pjsip_regc` directly, and doing so
+  would mean bypassing pjsua-lib, which invariant #1 rules out.
+- Recorded because it is the basis of the optional "Deliverable B" in
+  `VoIP/TASK-code-pjsip-disable-reg-on-modify.md`, and because it sharpens §1.1: the cost of an
+  `unreg_first` field is a *pjsua* policy, not a SIP or regc necessity.
+- Caveat: whether `pjsua_regc_init()` is reached only when `acc->regc == NULL` is **unverified**.
+
 ## TD-24 — a socket the OS killed during suspension is discovered late, not on resume · open (iOS)
 Raised by Pavel 2026-08-04, and the sharp edge under `Push-vs-Active-Socket.md` §5. When iOS
 suspends the app it reclaims the TCP/TLS connection, but **pjsip has no resume hook**: it learns
@@ -281,30 +310,48 @@ changed), or tolerate `PJSIP_EBUSY` there. **Needs a runtime test to confirm the
 analysis is static; `pjsua_acc_modify` returns only after `pjsip_regc_send`, but whether `has_tsx`
 is still set by the time we call depends on transport speed.
 
-## TD-22 — a 439 (First Hop Lacks Outbound Support) would leave us permanently unregistered · open (latent)
+## TD-22 — a 439 (First Hop Lacks Outbound Support) left us permanently unregistered · **discharged upstream 2026-08 (pending a PJSIP bump)**
 Verified 2026-08-04 against local master `4896a5e6a`. `use_rfc5626` defaults to `PJ_TRUE`, so on
 TCP/TLS pjsua sends `;reg-id` + `Supported: outbound` — exactly the combination RFC 5626 §6
 requires a registrar to answer with **439** when the first hop does not add `Path: <…;ob>`. pjsip
-defines the status code (`sip_msg.h`) and handles it nowhere: it is absent from `regc_cb()`'s
-auto-retry set, `update_rfc5626_status()` only reads the `Require` header of a 2xx, and
-`use_rfc5626` is never downgraded — so every subsequent attempt gets 439 too.
-- Not live: no TLS/TCP deployment yet. Latent the moment we register through someone else's edge
-  proxy.
-- App-side mitigation: on `on_reg_state` code 439, re-apply the config with `use_rfc5626 = false`.
-  Note `use_rfc5626` is an `unreg_first` field, so never mid-call.
-- Upstream note: [`439-first-hop-lacks-outbound-not-handled`](../Upstream/439-first-hop-lacks-outbound-not-handled.md).
+defined the status code (`sip_msg.h`) and handled it nowhere: absent from `regc_cb()`'s auto-retry
+set, `update_rfc5626_status()` only read the `Require` header of a 2xx, and `use_rfc5626` was never
+downgraded — so every subsequent attempt got 439 too.
+
+**Fixed upstream by our own PRs:** [#5154](https://github.com/pjsip/pjproject/pull/5154)
+(`77ad3feec`) retries registration without SIP outbound on 439, and
+[#5168](https://github.com/pjsip/pjproject/pull/5168) (`716ef557d`) completes the lifecycle —
+`first_hop_changed` + `reset_outbound_rejection()` in `pjsua_acc_modify()`, so changing the first
+hop clears the sticky rejection instead of retrying into another 439.
+- **The app-side mitigation this entry used to prescribe is now unnecessary** — do not add it.
+- **Remains open until `swift-pjsip` ships a binary containing both commits** (TD-1 pins a branch,
+  not a tag; the shipped binary is still 2.16-era). Until then a 439 in the field still bricks
+  registration. Bump checklist: `Upstream/reference-post-2.16-fixes-impact.md`.
+- Note: [`pjproject-5154`](../Upstream/pjproject-5154-439-first-hop-lacks-outbound.md). The
+  remaining half — pushing the Contact to the regc when outbound turns out unsupported — is still
+  on the fork as [laconicman#7](https://github.com/laconicman/pjproject/pull/7).
 
 ## TD-21 — `disable_reg_on_modify` is not a safe "apply config quietly" switch · obligation
-Verified 2026-08-04. The flag suppresses the un-REGISTER and re-REGISTER, but `pjsua_acc_modify()`
-calls `destroy_regc(acc, PJ_TRUE)` **unconditionally** on the `unreg_first` path — which NULLs the
-regc (cancelling its refresh timer), clears `acc->contact` and `reg_mapped_addr`, and resets
-`rfc5626_status`/`rfc5626_flowtmr`. The result: the server keeps a binding we will never refresh,
-and new dialogs get a Contact synthesised by `pjsua_acc_create_uas_contact()` without our
-`contact_uri_params`.
-- **The obligation: the engine must never set `disable_reg_on_modify`** as a way to apply
+Verified 2026-08-04, **history established 2026-08-17**. The flag suppresses the un-REGISTER and
+re-REGISTER, but `pjsua_acc_modify()` calls `destroy_regc(acc, PJ_TRUE)` on the `unreg_first` path
+regardless — which NULLs the regc (cancelling its refresh timer), clears `acc->contact` and
+`reg_mapped_addr`, and resets `rfc5626_status`/`rfc5626_flowtmr`. The server keeps a binding we
+will never refresh, and new dialogs get a Contact synthesised by `pjsua_acc_create_uas_contact()`
+without our `contact_uri_params`.
+
+**This is deliberate upstream behaviour, not a bug.** [#3910](https://github.com/pjsip/pjproject/pull/3910)
+guarded the whole block; [#4509](https://github.com/pjsip/pjproject/pull/4509) (`ce81bb698`,
+labelled `type: bug`) moved the guard inward on purpose — *"destroying old regc may still be
+needed so we can use the updated registration related settings"*. Only the doc comment is stale,
+in both `pjsua.h` and `pjsua2/account.hpp`.
+- **The obligation stands: the engine must never set `disable_reg_on_modify`** as a way to apply
   configuration without signalling. The only fields that are genuinely signalling-free are the
   silent column of `offhook/docs/Push-vs-Active-Socket.md` §1.1.
-- Upstream note: [`acc-modify-disable-reg-still-destroys-regc`](../Upstream/acc-modify-disable-reg-still-destroys-regc.md).
+- **Reassurance for our design:** #4509's rationale is the same shape as our pending-config slot
+  drained on last-call-end — apply the settings, let the next registration pick them up. We simply
+  have to own the re-registration.
+- Upstream note: [`draft-acc-modify-disable-reg-still-destroys-regc`](../Upstream/draft-acc-modify-disable-reg-still-destroys-regc.md);
+  handoff: `VoIP/TASK-code-pjsip-disable-reg-on-modify.md`.
 
 ## TD-20 — RFC 8599 is app-side string work; pjsip implements none of it · open
 Verified 2026-07-26 against local master `4896a5e6a` (grep) and a DeepWiki deep consult

@@ -2,8 +2,10 @@
 
 Minimal Swift registrars that reproduce SIP behaviour the public test harnesses
 cannot. Written to verify the upstream 439 fix
-(`439-first-hop-lacks-outbound-not-handled.md`, pjsip/pjproject#5146), kept
-because the scenarios recur and each one caught a real defect.
+([`pjproject-5154-439-first-hop-lacks-outbound.md`](../pjproject-5154-439-first-hop-lacks-outbound.md)
+— issue pjsip/pjproject#5146 → PR [#5154](https://github.com/pjsip/pjproject/pull/5154), merged,
+plus follow-up [#5168](https://github.com/pjsip/pjproject/pull/5168)), kept because the scenarios
+recur and each one caught a real defect.
 
 They are plain `swift`-runnable scripts, deliberately **not** a SwiftPM target:
 `swift-pjsua` is iOS-only, and a macOS socket executable has no business in its

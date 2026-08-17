@@ -1,34 +1,61 @@
 # Upstream notes
 
-Drafts for fixing root causes in [`pjsip/pjproject`](https://github.com/pjsip/pjproject) so
-swift-pjsua's local workarounds can be retired. Convention borrowed from GitLabKit: each note
-carries a **pasteable issue draft** (GitHub-flavoured markdown for the pjproject tracker) and
-enough **repro/context** to elaborate later. File only after re-verifying against current
-`master` (our observations are from the pjsip **2.16** binary shipped in `swift-pjsip`;
-DeepWiki deep-mode on `pjsip/pjproject` is the designated verification tool).
+Root-cause fixes and enhancements for [`pjsip/pjproject`](https://github.com/pjsip/pjproject) —
+retiring swift-pjsua's local workarounds where there is one, and improving the shared stack where
+there isn't. Convention borrowed from GitLabKit: each note carries a **pasteable issue/PR draft**
+(GitHub-flavoured markdown for the pjproject tracker) and enough **repro/context** to elaborate
+later. File only after re-verifying against current `master` (our observations are from the pjsip
+**2.16** binary shipped in `swift-pjsip`; DeepWiki deep-mode on `pjsip/pjproject` is the designated
+verification tool).
 
-## Shipped upstream ✅
+## File naming
+
+`<tracker>-<number>-<slug>.md` once something is filed — `pjproject-5178-…`, `ossfuzz-15956-…`.
+The number is the tracker ref (the **PR** where one exists, else the issue) and never changes, so
+links stay stable for the life of the note. Before filing: `draft-<slug>.md`. Dropped without
+filing: `closed-<slug>.md`. Background material that is not an issue draft: `reference-<slug>.md`.
+
+Deliberately **not** encoded in the filename: whether something is merged. That flips over time and
+every flip would break every inbound link across four repos. Live adoption status lives in the
+tables below and in each note's header.
+
+The `draft-` → `<tracker>-<number>-` rename is the one exception, and it happens **once**, at
+filing. When a note spans more than one artefact (issue body, problem statement) all of its files
+take the same number — e.g. `pjproject-5154-439-first-hop-lacks-outbound.md` and
+`pjproject-5154-439-issue-body.md`.
+
+## Working with the fork
+
+Contributions go through [`laconicman/pjproject`](https://github.com/laconicman/pjproject) first: a
+branch, then a PR **against the fork's own master** for Devin review, and only then the upstream PR.
+Two consequences worth remembering: the fork PR number and the upstream PR number are different (the
+notes here carry the *upstream* one), and fork PRs run CIFuzz against upstream's tree, so their
+Fuzzing check is meaningless — see [ossfuzz-15956](ossfuzz-15956-cifuzz-fork-pr-ref.md).
+
+## Filed upstream
 
 | Note | Problem | Outcome |
 |---|---|---|
-| [acc-table-full-asserts-in-debug](acc-table-full-asserts-in-debug.md) | `pjsua_acc_add` used `PJ_ASSERT_RETURN` for a user-input-driven capacity condition → debug builds **abort** where release returns `PJ_ETOOMANY` | issue [#5069](https://github.com/pjsip/pjproject/issues/5069) → PR [#5070](https://github.com/pjsip/pjproject/pull/5070) **merged** (`54ebfdbec`). Local `addAccount` guard kept: older pinned binaries still assert, and it yields a typed error carrying the capacity |
-| [warn-oversized-udp-fallback-issue](warn-oversized-udp-fallback-issue.md) | Oversized request silently falls back to UDP when the §18.1.1 TCP upgrade has no TCP transport to acquire — no log line, docs promise the opposite | issue [#5075](https://github.com/pjsip/pjproject/issues/5075) → PR [#5076](https://github.com/pjsip/pjproject/pull/5076) **merged** (`PJ_PERROR` at the fallback + doc note) |
-| [warn-oversized-udp-fallback-issue](warn-oversized-udp-fallback-issue.md) — *docs follow-up* | The guide page that made the false promise was left unchanged by #5076: it still asserted the 401/407 retry "will be sent with TCP" with no prerequisite, and framed the missing-transport case as an error you *will* see (not emitted on the address-fallback path) | [pjproject_docs#66](https://github.com/pjsip/pjproject_docs/issues/66) → PR [pjproject_docs#67](https://github.com/pjsip/pjproject_docs/pull/67) — **filed 2026-08-04**, Sphinx build verified locally |
+| [pjproject-5070](pjproject-5070-acc-table-full-asserts-in-debug.md) | `pjsua_acc_add` used `PJ_ASSERT_RETURN` for a user-input-driven capacity condition → debug builds **abort** where release returns `PJ_ETOOMANY` | issue [#5069](https://github.com/pjsip/pjproject/issues/5069) → PR [#5070](https://github.com/pjsip/pjproject/pull/5070) **merged** (`54ebfdbec`). Local `addAccount` guard kept: older pinned binaries still assert, and it yields a typed error carrying the capacity |
+| [pjproject-5076](pjproject-5076-warn-oversized-udp-fallback.md) | Oversized request silently falls back to UDP when the §18.1.1 TCP upgrade has no TCP transport to acquire — no log line, docs promise the opposite | issue [#5075](https://github.com/pjsip/pjproject/issues/5075) → PR [#5076](https://github.com/pjsip/pjproject/pull/5076) **merged** (`PJ_PERROR` at the fallback + doc note) |
+| [pjproject-5076](pjproject-5076-warn-oversized-udp-fallback.md) — *docs follow-up* | The guide page that made the false promise was left unchanged by #5076: it still asserted the 401/407 retry "will be sent with TCP" with no prerequisite, and framed the missing-transport case as an error you *will* see (not emitted on the address-fallback path) | [pjproject_docs#66](https://github.com/pjsip/pjproject_docs/issues/66) → PR [pjproject_docs#67](https://github.com/pjsip/pjproject_docs/pull/67) — **filed 2026-08-04**, Sphinx build verified locally |
+| [pjproject-5154](pjproject-5154-439-first-hop-lacks-outbound.md) | `use_rfc5626` defaults on, so pjsua sent `;reg-id` + `Supported: outbound` — the exact RFC 5626 §6 439 trigger — and then handled 439 nowhere: absent from `regc_cb()`'s retry set, no outbound fallback, `use_rfc5626` never downgraded → account **permanently unregistered** | PR [#5154](https://github.com/pjsip/pjproject/pull/5154) **merged** (`77ad3feec`) → follow-up PR [#5168](https://github.com/pjsip/pjproject/pull/5168) **merged** (`716ef557d`), adding `first_hop_changed` + `reset_outbound_rejection()` in `pjsua_acc_modify()` so a first-hop change clears the sticky rejection. **Retires TD-22.** Remaining half still on the fork: [laconicman#7](https://github.com/laconicman/pjproject/pull/7) |
+| [pjproject-5178](pjproject-5178-coreaudio-vpio-other-audio-ducking.md) | **Enhancement, not a defect.** The coreaudio backend never configures VPIO's other-audio ducking, so the OS holds a *fixed* duck for the whole call — music a user was listening to stays flattened from answer to hangup. macOS 14 / iOS 17 added `kAUVoiceIOProperty_OtherAudioDuckingConfiguration`, whose advanced mode follows voice activity instead | issue [#5177](https://github.com/pjsip/pjproject/issues/5177) → PR [#5178](https://github.com/pjsip/pjproject/pull/5178) — **merged 2026-08-17** (`65a7e0cba`), verbatim, no maintainer edits (filed 2026-08-11). Two `#ifndef` `config.h` macros. **Review round 1 (sauwming, 2026-08-12) applied:** default flipped to `0` at his request, enabled for iOS via `config_site_sample.h` under `PJ_CONFIG_IPHONE`, and `!TARGET_OS_TV && !TARGET_OS_WATCH` added to the guard (load-bearing — tvOS failed to compile without it). Full CI green on macOS/Linux/Windows. macOS deliberately left on the old behaviour upstream (sauwming: "I suppose we can leave MacOS as it is right now") — `swift-pjsip` sets the macro itself. Written from `AudioUnitProperties.h` + WWDC23 10235 only — **never** from SashaSIP's GPL patch, since pjproject is dual-licensed. Listening test **not** done |
 
 ## Ready to file
 
 | Note | Problem | Local mitigation today | Status |
 |---|---|---|---|
-| [acc-modify-resets-unset-fields](acc-modify-resets-unset-fields.md) | `pjsua_acc_modify()` takes most settings from the supplied struct, so fields left at `pjsua_acc_config_default()` values are silently reset (`rtp_cfg`, ICE/TURN cfg, creds, proxies, reg timers, `ka_interval`, assorted switches). Docs never say so, nor point at `pjsua_acc_get_config()` | `reRegister` does read-modify-write (D-CONFIG-4) | **verified 2026-07-17 vs master `c1ea7648`**, field list corrected by reading `pjsua_acc_modify()` itself (it is field-by-field, and `server_affinity` is *not* reset) — documentation issue. **This one cost us a real bug** |
-| [tls-listener-restart-drops-credentials](tls-listener-restart-drops-credentials.md) | `pjsua_transport_lis_restart()` takes `tls_setting` from the supplied config, but `pjsua_transport_config_default()` zeroes every cert/key/CA/verify field → restarting a TLS listener from a defaulted struct **silently disables mutual TLS**. The doc actively invites passing a config to update certs | none needed yet — we only `create` transports and ship no TLS | **verified 2026-07-17 vs master `c1ea7648`** (all three sources read) — documentation issue; TD-19. Reached via `pjsua_handle_ip_change`, so it lands on the M2 milestone |
-| [acc-modify-disable-reg-still-destroys-regc](acc-modify-disable-reg-still-destroys-regc.md) | `pjsua_acc_modify()` calls `destroy_regc(acc, PJ_TRUE)` **unconditionally** on the `unreg_first` path, so `disable_reg_on_modify` suppresses the REGISTER traffic but still kills the regc, its refresh timer, `acc->contact` and the SIP-outbound state → the server keeps a binding the client will never refresh | none needed — we never set the flag, and now must not (TD-21) | **verified 2026-08-04 vs local master `4896a5e6a`** (three functions read) — documentation issue, with an optional behaviour fix offered. Third of the modify-style-API family |
-| [439-first-hop-lacks-outbound-not-handled](439-first-hop-lacks-outbound-not-handled.md) | `use_rfc5626` defaults on, so pjsua sends `;reg-id` + `Supported: outbound` — the exact RFC 5626 §5.3 439 trigger — and then handles 439 nowhere: not in `regc_cb()`'s retry set, no outbound fallback, `use_rfc5626` never downgraded → **permanently unregistered** | none needed yet — no TCP/TLS deployment; latent (TD-22) | **verified 2026-08-04 vs local master `4896a5e6a`** (five functions + `sip_msg.h` read) — **behaviour** issue, unlike the rest of this table. Patch suggested (`rfc5626_status = OUTBOUND_NA` + `schedule_reregistration`) |
+| [draft-acc-modify-resets-unset-fields](draft-acc-modify-resets-unset-fields.md) | `pjsua_acc_modify()` takes most settings from the supplied struct, so fields left at `pjsua_acc_config_default()` values are silently reset (`rtp_cfg`, ICE/TURN cfg, creds, proxies, reg timers, `ka_interval`, assorted switches). Docs never say so, nor point at `pjsua_acc_get_config()` | `reRegister` does read-modify-write (D-CONFIG-4) | **verified 2026-07-17 vs master `c1ea7648`**, field list corrected by reading `pjsua_acc_modify()` itself (it is field-by-field, and `server_affinity` is *not* reset) — documentation issue. **This one cost us a real bug** |
+| [draft-tls-listener-restart-drops-credentials](draft-tls-listener-restart-drops-credentials.md) | `pjsua_transport_lis_restart()` takes `tls_setting` from the supplied config, but `pjsua_transport_config_default()` zeroes every cert/key/CA/verify field → restarting a TLS listener from a defaulted struct **silently disables mutual TLS**. The doc actively invites passing a config to update certs | none needed yet — we only `create` transports and ship no TLS | **verified 2026-07-17 vs master `c1ea7648`** (all three sources read) — documentation issue; TD-19. Reached via `pjsua_handle_ip_change`, so it lands on the M2 milestone |
+| [draft-acc-modify-disable-reg-still-destroys-regc](draft-acc-modify-disable-reg-still-destroys-regc.md) | `pjsua_acc_modify()` calls `destroy_regc(acc, PJ_TRUE)` on the `unreg_first` path regardless of `disable_reg_on_modify`, killing the regc, its refresh timer, `acc->contact` and the SIP-outbound state → the server keeps a binding the client will never refresh. **The behaviour is deliberate ([#4509](https://github.com/pjsip/pjproject/pull/4509)); the doc comment still describes the pre-#4509 semantics from [#3910](https://github.com/pjsip/pjproject/pull/3910)** | none needed — we never set the flag, and now must not (TD-21) | **revised 2026-08-17 vs `upstream/master` `27d28485f`**, history read. **Documentation-only** — the 08-04 draft's alternative "guard `destroy_regc()`" fix would have reverted a maintainer's own `type: bug` change and has been removed. Handoff: `TASK-code-pjsip-disable-reg-on-modify-docs.md` |
 
 ## Closed without filing
 
 | Note | Outcome |
 |---|---|
-| [udp-tcp-switch-not-reapplied-on-auth-resend](udp-tcp-switch-not-reapplied-on-auth-resend.md) | **Root cause disproven — deliberately not filed.** The stateless reuse branch *does* call `stateless_send_resolver_callback` in both 2.16 and master, so the §18.1.1 switch re-runs; both fixes we drafted were unsound. The observed fragmentation was the *no TCP transport to switch to* case, which became #5075 above. Kept with the analysis struck through: the symptom was real, and a future investigation should start from a live transport-level trace |
+| [ossfuzz-15956](ossfuzz-15956-cifuzz-fork-pr-ref.md) | For `google/oss-fuzz`, not pjproject. CIFuzz resolves `refs/pull/<N>/merge` against the **upstream** repo, not the fork — so on our fork it either silently fuzzes upstream's default branch and reports **green**, or (on a number collision) builds an unrelated upstream PR. Our PR #5 built a **2018** pjproject PR. Fork *support* is declined upstream ([#3731](https://github.com/google/oss-fuzz/issues/3731) `bug`+`wontfix`, [#10472](https://github.com/google/oss-fuzz/issues/10472), [#7479](https://github.com/google/oss-fuzz/issues/7479)) — not re-argued. The separable "don't report green" half, which the maintainer left open, is filed as [#15956](https://github.com/google/oss-fuzz/issues/15956). **Practical upshot: ignore the Fuzzing checks on fork PRs entirely — green means nothing either.** |
+| [closed-udp-tcp-switch-not-reapplied](closed-udp-tcp-switch-not-reapplied-on-auth-resend.md) | **Root cause disproven — deliberately not filed.** The stateless reuse branch *does* call `stateless_send_resolver_callback` in both 2.16 and master, so the §18.1.1 switch re-runs; both fixes we drafted were unsound. The observed fragmentation was the *no TCP transport to switch to* case, which became #5075 above. Kept with the analysis struck through: the symptom was real, and a future investigation should start from a live transport-level trace |
 
-Not an issue draft: [post-2.16-fixes-impact.md](post-2.16-fixes-impact.md) — the reverse scan of
+Not an issue draft: [reference-post-2.16-fixes-impact.md](reference-post-2.16-fixes-impact.md) — the reverse scan of
 upstream fixes since 2.16 and the bump checklist.

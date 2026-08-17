@@ -1,8 +1,20 @@
 # A 439 (First Hop Lacks Outbound Support) leaves a pjsua account permanently unregistered
 
-Upstream note for `pjsip/pjproject`. **Status: verified 2026-08-04 against local master
-`4896a5e6a` (`2.17-98-g4896a5e6a`), sources read directly — ready to file** (behaviour issue, not
-documentation).
+Upstream note for `pjsip/pjproject`. **Status: MERGED.** PR
+[#5154](https://github.com/pjsip/pjproject/pull/5154) (`77ad3feec`) — *"pjsua: retry registration
+without SIP outbound on 439"* — plus follow-up
+[#5168](https://github.com/pjsip/pjproject/pull/5168) (`716ef557d`) — *"pjsua: complete the SIP
+outbound rejection reset lifecycle"*, which added the `first_hop_changed` / `reset_outbound_rejection()`
+handling in `pjsua_acc_modify()` so a first-hop change clears the sticky rejection instead of
+retrying into another 439.
+
+Originally verified 2026-08-04 against local master `4896a5e6a`; issue body kept in
+[`pjproject-5154-439-issue-body.md`](pjproject-5154-439-issue-body.md). The problem statement below
+describes the **pre-fix** state and is retained as the record of why the change was made.
+
+**Still open from this line of work:** fork PR
+[laconicman/pjproject#7](https://github.com/laconicman/pjproject/pull/7) — *"push the Contact to the
+regc when outbound turns out unsupported"* — the remaining half, not yet sent upstream.
 
 Unlike the other notes in this folder this is not a "fresh default into a modify-style API"
 documentation trap: pjsua emits exactly the request that provokes a 439, has SIP outbound **on by

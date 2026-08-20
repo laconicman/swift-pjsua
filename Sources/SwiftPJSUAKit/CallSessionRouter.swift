@@ -299,6 +299,12 @@ public actor CallSessionRouter {
         case let .registrationState(account, active, statusCode, expiration):
             // No CallKit mapping (§3) — relay to the app's account UI on the main actor.
             await registrationObserver?(account, active, statusCode, expiration)
+
+        case .streamDestroyed, .callMediaEvent:
+            // No CallKit mapping either, and deliberately not invented: neither event ends a
+            // call, and CallKit has no vocabulary for "still connected, but the media is dead".
+            // End-of-stream statistics and media-failure policy are the app's (offhook OH-10).
+            break
         }
     }
 

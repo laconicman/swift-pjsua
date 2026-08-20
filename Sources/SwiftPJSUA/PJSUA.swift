@@ -90,6 +90,26 @@ public actor PJSUA {
         try pjsua_create().throwIfFailed()
         executor.registerThisThread(name: "swift-pjsua.engine") // defensive no-op
 
+        // 1a. Keep the RFC 3261 §18.1.1 UDP→TCP size switch enabled.
+        //
+        // `sip_util.c:1419` guards the whole §18.1.1 block on `disable_tcp_switch == 0` — size
+        // check and TCP-transport lookup alike. With the switch off, an authenticated INVITE —
+        // which crosses the 1300-byte threshold once the digest is added — is sent over UDP
+        // anyway, fragments, and is dropped: no call over a UDP transport can ever be
+        // established. Measured at two independent providers
+        // (offhook docs/SIP-Test-Infrastructure.md §6).
+        //
+        // KEPT DELIBERATELY, though it is now belt-and-braces. `swift-pjsip` 0.1.x compiled the
+        // binary with `PJSIP_DONT_SWITCH_TO_TCP 1` — the *opposite* of pjsip's default — and this
+        // line was the only thing making UDP calling work at all. 0.2.0 drops that define, so a
+        // current binary already has the switch on. The line stays because the package resolves
+        // by range: an engine built against an older swift-pjsip would silently lose UDP calling
+        // again, and re-asserting the pjsip default costs one store.
+        //
+        // Set at runtime because the compile-time macro lives in a prebuilt binary, and here
+        // because `pjsip_cfg()` must be settled before `pjsua_init()` reads it.
+        pjsip_cfg().pointee.endpt.disable_tcp_switch = 0
+
         // 2. configure: callbacks + logging + media.
         var cfg = pjsua_config()
         pjsua_config_default(&cfg)

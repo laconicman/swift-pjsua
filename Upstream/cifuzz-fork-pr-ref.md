@@ -1,3 +1,11 @@
+---
+area: ci
+kind: bug
+status: filed
+tracker:
+  issue: google/oss-fuzz#15956
+---
+
 # CIFuzz builds the wrong code on forks
 
 **Status: investigated 2026-08-05. Fork *support* is declined upstream and not worth re-arguing;

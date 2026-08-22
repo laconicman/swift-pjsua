@@ -1,3 +1,13 @@
+---
+area: media-event
+kind: bug
+status: filed
+verified: 288de6142
+tracker:
+  issue: pjsip/pjproject#5204
+  pr: pjsip/pjproject#5205
+---
+
 # `call_media_on_event()` orphans a recycled event node when the call is hanging up
 
 Upstream note for `pjsip/pjproject`. **Status: FILED 2026-08-19** — issue

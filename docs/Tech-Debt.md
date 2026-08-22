@@ -126,7 +126,7 @@ on 2026-08-11:
   other-audio ducking we contributed upstream ([#5178](https://github.com/pjsip/pjproject/pull/5178),
   filed 2026-08-11) — with a macOS 14+ floor a Mac slice can have voice-activity-driven ducking;
   below it, calls keep the old whole-call duck. See
-  [`Upstream/pjproject-5178-coreaudio-vpio-other-audio-ducking.md`](../Upstream/pjproject-5178-coreaudio-vpio-other-audio-ducking.md).
+  [`Upstream/coreaudio-vpio-other-audio-ducking.md`](../Upstream/coreaudio-vpio-other-audio-ducking.md).
 - **Nothing Apple-specific arrives by default — we must ask for it.** At the maintainer's request
   #5178 (merged 2026-08-17) ships with `PJMEDIA_AUDIO_DEV_COREAUDIO_ADVANCED_DUCKING` defaulting
   to `0`, switched on upstream only inside `config_site_sample.h`'s `PJ_CONFIG_IPHONE` block —
@@ -281,7 +281,7 @@ every path that kills a call *without ending it* is invisible.**
 - **Sequencing.** Install only what §3/§4 of `../../TASK-code-call-lifecycle-verification.md`
   needs to observe, *after* that task's §2 has confirmed the premise live. The full callback set
   is not worth wiring for a failure mode nobody has reproduced yet.
-- Refs: [Call-Termination-Paths](./Call-Termination-Paths.md); `../Upstream/draft-no-transport-death-notification-for-established-calls.md`;
+- Refs: [Call-Termination-Paths](./Call-Termination-Paths.md); `../Upstream/no-transport-death-notification-for-established-calls.md`;
   `../../offhook/docs/Call-Quality-Statistics.md`; relates TD-3, TD-24, TD-26.
 
 ## TD-26 — we populate `pjsua_stream_stat.jbuf` and then discard it, along with jitter deviation · open
@@ -397,8 +397,8 @@ hop clears the sticky rejection instead of retrying into another 439.
 - **The app-side mitigation this entry used to prescribe is now unnecessary** — do not add it.
 - **Remains open until `swift-pjsip` ships a binary containing both commits** (TD-1 pins a branch,
   not a tag; the shipped binary is still 2.16-era). Until then a 439 in the field still bricks
-  registration. Bump checklist: `Upstream/reference-post-2.16-fixes-impact.md`.
-- Note: [`pjproject-5154`](../Upstream/pjproject-5154-439-first-hop-lacks-outbound.md). The
+  registration. Bump checklist: `Upstream/post-2.16-fixes-impact.md`.
+- Note: [`pjproject-5154`](../Upstream/439-first-hop-lacks-outbound.md). The
   remaining half — pushing the Contact to the regc when outbound turns out unsupported — is still
   on the fork as [laconicman#7](https://github.com/laconicman/pjproject/pull/7).
 
@@ -421,7 +421,7 @@ in both `pjsua.h` and `pjsua2/account.hpp`.
 - **Reassurance for our design:** #4509's rationale is the same shape as our pending-config slot
   drained on last-call-end — apply the settings, let the next registration pick them up. We simply
   have to own the re-registration.
-- Upstream note: [`draft-acc-modify-disable-reg-still-destroys-regc`](../Upstream/draft-acc-modify-disable-reg-still-destroys-regc.md);
+- Upstream note: [`acc-modify-disable-reg-still-destroys-regc`](../Upstream/acc-modify-disable-reg-still-destroys-regc.md);
   handoff: `VoIP/TASK-code-pjsip-disable-reg-on-modify.md`.
 
 ## TD-20 — RFC 8599 is app-side string work; pjsip implements none of it · open

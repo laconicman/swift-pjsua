@@ -257,7 +257,7 @@ Three delivery details that matter to a Swift wrapper:
 3. **That free list leaks a node per event dropped during hangup.** `:1936-1937` returns early when
    `call->hanging_up`, *after* the node has been erased from the free list at `:1931` and without
    pushing it back. Filed as
-   [draft-media-event-node-leaked-on-hangup](../Upstream/draft-media-event-node-leaked-on-hangup.md).
+   [media-event-node-leaked-on-hangup](../Upstream/media-event-node-leaked-on-hangup.md).
 
 **What pjsua *does* act on**, and therefore what the app can react to today:
 
@@ -365,7 +365,9 @@ Everything above was read from source. This is the run that tested it.
 
 **Setup.** iOS Simulator (iPhone 16 Pro, iOS 18.5), `swift-pjsua` over the `swift-pjsip` binary
 (**PJ_VERSION 2.16.0** — predated our five merged upstream PRs; every number below was taken on
-that build),
+that build, and **re-baselined unchanged on 2.17.0 / swift-pjsip 0.2.0, 2026-08-20**: three
+`on_stream_destroyed` records against four log lines, iLBC, `Session-Expires: 1800`, and transmit
+freezing at 21–22 packets),
 loopback call through `sip.linphone.org` (Flexisip) on **TCP**, iLBC, session timer negotiated
 (`Session-Expires: 1800;refresher=uac`).
 

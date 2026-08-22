@@ -1,3 +1,10 @@
+---
+area: acc-modify
+kind: docs
+status: ready
+verified: c1ea7648
+---
+
 # `pjsua_acc_modify()` applies the whole struct, silently resetting fields the caller left at defaults
 
 Upstream note for `pjsip/pjproject`. **Status: verified 2026-07-17 against master `c1ea7648`

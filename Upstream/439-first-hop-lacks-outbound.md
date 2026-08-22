@@ -1,3 +1,13 @@
+---
+area: rfc5626-outbound
+kind: bug
+status: merged
+verified: 77ad3feec
+tracker:
+  pr: pjsip/pjproject#5154
+  followup_pr: pjsip/pjproject#5168
+---
+
 # A 439 (First Hop Lacks Outbound Support) leaves a pjsua account permanently unregistered
 
 Upstream note for `pjsip/pjproject`. **Status: MERGED.** PR
@@ -9,7 +19,7 @@ handling in `pjsua_acc_modify()` so a first-hop change clears the sticky rejecti
 retrying into another 439.
 
 Originally verified 2026-08-04 against local master `4896a5e6a`; issue body kept in
-[`pjproject-5154-439-issue-body.md`](pjproject-5154-439-issue-body.md). The problem statement below
+[`439-first-hop-lacks-outbound.issue-body.md`](439-first-hop-lacks-outbound.issue-body.md). The problem statement below
 describes the **pre-fix** state and is retained as the record of why the change was made.
 
 **Still open from this line of work:** fork PR

@@ -1,10 +1,17 @@
+---
+area: rtcp-xr
+kind: question
+status: ready
+verified: cb0544e0d
+---
+
 # RTCP XR: the local R-factor field has no writer, so pjproject always reports it unavailable
 
 Upstream note for `pjsip/pjproject`. **Status: mechanically verified 2026-08-17 against fork
 `cb0544e0d` (upstream master of the same day: `7e95d9f70`); the *reading of intent* is not verified
 — file as a question, not as a bug report.**
 
-Sibling of [draft-rtcp-xr-no-structured-pjsua1-accessor](draft-rtcp-xr-no-structured-pjsua1-accessor.md).
+Sibling of [rtcp-xr-no-structured-pjsua1-accessor](rtcp-xr-no-structured-pjsua1-accessor.md).
 Both came out of the same call-quality design pass; they are separate notes because they would be
 separate issues.
 

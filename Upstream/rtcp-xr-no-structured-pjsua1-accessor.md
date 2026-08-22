@@ -1,3 +1,10 @@
+---
+area: rtcp-xr
+kind: enhancement
+status: ready
+verified: cb0544e0d
+---
+
 # RTCP XR statistics are unreachable from pjsua1 except by parsing a text dump
 
 Upstream note for `pjsip/pjproject`. **Status: verified 2026-08-17 against fork `cb0544e0d`
@@ -80,7 +87,7 @@ for now: three independent gates all default to off —
 — the third also adds `a=rtcp-xr` to the SDP (`pjsua_media.c:3352-3360`), i.e. enabling it is a
 signalling change visible to every registrar and SBC, in exchange for a debug statistic. And it
 would not yield a MOS in any case (see the sibling note,
-[draft-rtcp-xr-r-factor-has-no-writer](draft-rtcp-xr-r-factor-has-no-writer.md) — pjmedia never
+[rtcp-xr-r-factor-has-no-writer](rtcp-xr-r-factor-has-no-writer.md) — pjmedia never
 computes the quality scores). Reasoning: `offhook/docs/Call-Quality-Statistics.md` §6.
 
 **The defaults are deliberate**, documented in the macro comments (footprint, plus per-stream

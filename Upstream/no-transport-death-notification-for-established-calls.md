@@ -1,3 +1,12 @@
+---
+area: call-transport
+kind: docs
+status: hold
+verified: cb0544e0d
+blocked_by: >-
+  TASK-code-call-lifecycle-verification.md §2 — never observed live; if anything fires when an idle call's transport is killed, the premise is wrong
+---
+
 # An established call is never told its transport died — transport-state listeners are per-transaction only
 
 Upstream note for `pjsip/pjproject`. **Status: verified 2026-08-17 against fork `cb0544e0d`

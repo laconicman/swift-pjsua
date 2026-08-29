@@ -38,9 +38,24 @@ let package = Package(
         .library(name: "SwiftPJSUAKit", targets: ["SwiftPJSUAKit"]),
     ],
     dependencies: [
-        // swift-pjsip has no tagged release yet, so we track its trunk. Pin this to a
-        // version (`from: "x.y.z"`) once swift-pjsip cuts its first tag.
-        .package(url: "https://github.com/laconicman/swift-pjsip", branch: "main")
+        // A version range, not a branch: swift-pjsip's product is a prebuilt xcframework,
+        // so this dependency edge carries an ABI rather than source. `branch: "main"`
+        // re-resolved that binary on every upstream commit — an ABI that could move under
+        // us with no version to name it — and a `branch:` requirement also makes this
+        // package unusable as a versioned dependency of anything else.
+        //
+        // The range is upToNextMinor rather than `from:` because swift-pjsip's own bump
+        // rule (its docs/Versioning.md) makes the distinction load-bearing: a MINOR means
+        // the binary changed — config_site.h, PJSIP commit, patch set, slices — while a
+        // PATCH means only the packaging moved and the binary is untouched. So this accepts
+        // exactly the releases that cannot change the ABI under us, and adopting a new
+        // binary stays a deliberate one-line edit with a diff to review.
+        //
+        // Do not lower the floor. 0.2.0 was deleted — its module map dropped config_site.h's
+        // overrides, so Swift compiled PJSUA_MAX_ACC 4 against a binary built with 8 (see
+        // swift-pjsip ARCHITECTURE.md decision 4) — and 0.1.x is PJSIP 2.16, below the
+        // upstream floor this engine relies on for the 439 / RFC 5626 handling.
+        .package(url: "https://github.com/laconicman/swift-pjsip", "0.2.1" ..< "0.3.0")
     ],
     targets: [
         // The pure engine. Also doubles as the "support target" that carries the

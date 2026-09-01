@@ -81,11 +81,17 @@ let package = Package(
         .testTarget(
             name: "SwiftPJSUATests",
             // PJSIP is needed directly to feed C enum values (pjsip_inv_state,
-            // pjsip_transport_type_e) into the engine's mapping under test.
+            // pjsip_transport_type_e) into the engine's mapping under test, and to reach
+            // the transport C API the TLS tests exercise.
             dependencies: [
                 "SwiftPJSUA",
                 .product(name: "PJSIP", package: "swift-pjsip"),
-            ]
+            ],
+            // TLS certificate fixtures. They have to be *in the bundle*: pjsip reads the
+            // .p12 from a path at listener start, and iOS is the only Apple platform where
+            // a .p12 is self-contained (macOS resolves the key through the keychain), so
+            // the tests run in the Simulator with the files alongside them.
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "SwiftPJSUAKitTests",

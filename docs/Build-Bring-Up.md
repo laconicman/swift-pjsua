@@ -19,6 +19,19 @@ xcodebuild build -scheme <App> -destination 'platform=iOS Simulator,name=iPhone 
 The app target depends on `SwiftPJSUA` (+ `SwiftPJSUAKit`); the framework link flags ride in
 on `SwiftPJSUA`'s `linkerSettings` automatically (the support-target pattern, roadmap §3.5).
 
+An app target is needed for the *runtime smoke* below, but **not** for the test suites: the
+package's own generated scheme builds and runs them against the Simulator directly, which is how
+`SwiftPJSUATests` is run today.
+
+```
+xcodebuild test -scheme swift-pjsua-Package \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+```
+
+Add `-only-testing:SwiftPJSUATests/TLSTransportTests` to run one suite. Confirmed working on
+Xcode 26.6 with an iOS 26.5 simulator — 8 tests, no build warnings. This is a smaller gate than
+TD-12 asks for, but it is a real one and it needs no app.
+
 ## Predicted first-compile friction (triage in this order)
 
 | # | Site | What to verify against the real headers |

@@ -236,6 +236,27 @@ applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC
 - Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
   `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.
 
+## TD-26 — `linkerSettings` is short three frameworks, which blocks app-hosted tests · open (found 2026-09-03)
+`SwiftPJSUA` carries the `-framework` flags on behalf of everything that links the binary (the
+support-target pattern, roadmap §3.5) — and the list is incomplete. `libpjproject.a` contains
+`ios_opengl_dev.o`, whose `GLView` needs **OpenGLES** and **UIKit**, and raw **Metal** classes
+(`MTLRenderPipelineDescriptor`, `MTLTextureDescriptor`) that `MetalKit` alone does not bring.
+
+- **Why nobody has hit it:** a SwiftUI *app* links UIKit and Metal anyway, so the app target
+  resolves them by accident. The gap only shows where the binary is linked without an app
+  around it.
+- **What it blocks:** app-hosting `offhook`'s test bundle, which is the only route to running
+  XCTest on a **device** (Apple forbids tool-hosted testing on device destinations, and a
+  SwiftPM package test target cannot declare a host app at all). Verified 2026-09-03: adding
+  the host app generates correctly and then fails to link on those symbols.
+- **Fix:** add `OpenGLES`, `UIKit` and `Metal` to `linkerSettings`, or stop compiling the
+  OpenGL video device into the artifact — it is dead weight next to the VideoToolbox/Metal
+  path we actually use, and `swift-pjsip`'s `config_site.h` is where that is decided.
+- **Not sufficient on its own.** Hosting also puts the tests inside a process whose app already
+  constructs a `PJSUA` and installs the global event sink, and pjsua is process-global. See the
+  playbook.
+- Refs: [`offhook/docs/Testing-Playbook.md`](../../offhook/docs/Testing-Playbook.md) §2.
+
 ## TD-25 — `pjsip_regc` is mostly mutable in place; our mental model of `acc_modify` was too coarse · open (informational)
 From a DeepWiki deep consult 2026-08-17, verified against `sip_regc.h` / `sip_reg.c`. Only **five**
 pieces of `pjsip_regc` state have no public setter and therefore genuinely force a rebuild:

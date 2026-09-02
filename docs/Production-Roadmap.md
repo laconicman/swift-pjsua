@@ -169,11 +169,14 @@ Canonical (minimal) Apple reference for the Swift + PJSUA threading pattern:
 
 ## 5. Constraints & caveats (read before you build)
 
-- **Not yet compiled or run.** The skeleton was written against `swift-pjsip`'s API but was
-  never linked (no PJSIP module or iOS SDK in the authoring environment). Expect to fix
-  small things on first build. Symbol spellings that vary by PJSIP version (e.g. `PJ_SUCCESS`
-  vs the literal `0`, `PJSUA_INVALID_ID` vs `-1`, the `pjsua_call_info` media layout) are
-  centralized or commented; verify them against the exact `swift-pjsip` build you consume.
+- **Compiled and run on the Simulator; never on a device.** The skeleton was originally
+  written against `swift-pjsip`'s API without ever being linked (no PJSIP module or iOS SDK in
+  the authoring environment); that gap is closed — it builds, its tests run, and the `offhook`
+  live suite registers and calls through it. A **device** run is still outstanding, as is CI
+  (TD-12). Symbol spellings that vary by PJSIP version (e.g. `PJ_SUCCESS` vs the literal `0`,
+  `PJSUA_INVALID_ID` vs `-1`, the `pjsua_call_info` media layout) are centralized or commented;
+  re-verify them against the exact `swift-pjsip` build you consume, since nothing re-checks
+  them for you.
 - **iOS 17 minimum, iOS-only.** Custom actor executors (SE-0392) require the Swift 5.9
   concurrency runtime, which is **not back-deployed** below iOS 17. The package targets
   `.iOS(.v17)` and declares **no** macOS platform — `swift-pjsip` ships no macOS slice, so a

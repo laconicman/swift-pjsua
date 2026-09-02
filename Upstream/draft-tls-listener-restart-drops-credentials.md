@@ -186,9 +186,11 @@ reader who has just read the warning above will reasonably assume otherwise.
   ([conversation](https://deepwiki.com/search/misuse-sweep-for-that-same-cla_bb8d7a19-cc1b-44fb-bd24-32dd7d442b8e?mode=deep));
   the restart/recovery semantics were pinned in a follow-up deep consult
   ([conversation](https://deepwiki.com/search/design-question-about-tls-list_c88a6faf-8491-407d-a80a-4f4a03d46d05?mode=deep)).
-- **Held, not filed.** Two further defects surfaced with it and belong in the same conversation
-  rather than in three separate reports: `restart2`'s `if (!listener->ssock)` branch returns
-  `PJ_SUCCESS` without re-opening the listener or reloading the certificate, so once a restart has
-  failed no later restart can recover it (TD-22); and `ssl_sock_apple.m` labels every import
-  failure `"Apple SSL error SecItemImport"` even on iOS, which takes the `SecPKCS12Import()`
-  branch.
+- **The two defects that surfaced with it are filed**, as §5 and §7 of
+  [pjproject#5232](https://github.com/pjsip/pjproject/issues/5232) (with the missing `cert_direct`
+  branch as §6): `restart2`'s `if (!listener->ssock)` branch returns `PJ_SUCCESS` without
+  re-opening the listener or reloading the certificate, so once a restart has failed no later
+  restart can recover it (TD-22); and `ssl_sock_apple.m` labels every import failure
+  `"Apple SSL error SecItemImport"` even on iOS, which takes the `SecPKCS12Import()` branch.
+  **This note itself is still unfiled** — it is a documentation request against
+  `pjsua_transport_lis_restart()`, which #5232 deliberately does not cover.

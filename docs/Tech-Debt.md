@@ -412,15 +412,23 @@ The only route back appears to be destroying the transport and creating a new on
 settled before we ship TLS, because the whole fail-fast design is premised on restart being a
 usable recovery.
 
-**Upstream, but not ours to file right now** (three separate notes, all held per the handoff's
-"do not open PRs from this task"):
-- `restart2`'s no-listener branch should re-open the listener, or at minimum not report success.
-- `restart2` handles three credential branches (files, buffer, store) as `else if`; listener start
-  handles **four** independent `if`s including `cert_direct`. A `cert_direct` listener cannot be
-  restored by any restart. See TD-19.
-- `ssl_sock_apple.m` reports every import failure as `"Apple SSL error SecItemImport"`, but iOS
-  takes the `SecPKCS12Import()` branch — the label is macOS-only and misleads exactly the person
-  debugging an iOS certificate. Cosmetic, one string.
+**Upstream: filed, not fixed.** All three went into
+[pjproject#5232](https://github.com/pjsip/pjproject/issues/5232) — a register rather than a
+request, since none is blocking and the PR series was already carrying review load:
+- **§5** — `restart2`'s no-listener branch should re-open the listener, or at minimum not report
+  success. This is the one with teeth: it makes an unrecoverable listener indistinguishable from
+  a working one, on the path #5216 made the documented recovery.
+- **§6** — `restart2` handles three credential branches (files, buffer, store) as `else if`;
+  listener start handles **four** independent `if`s including `cert_direct`. A `cert_direct`
+  listener cannot be restored by any restart. See TD-19.
+- **§7** — `ssl_sock_apple.m` reports every import failure as `"Apple SSL error SecItemImport"`,
+  but iOS takes the `SecPKCS12Import()` branch. Cosmetic, one string, and it sends anyone
+  debugging a `.p12` to the wrong API's documentation.
+
+**None of this is fixed for us either way.** The eight-PR Apple-TLS series merged upstream on
+2026-09-02 — including #5222, the 8 KB fix — but our binary is pinned at 2.17.0 (`288de6142`),
+which predates all of it. The measurements above stand until a `swift-pjsip` rebuild, and the
+oversized-`.p12` test is what will tell us the rebuild happened.
 
 ## TD-21 — `disable_reg_on_modify` is not a safe "apply config quietly" switch · obligation
 Verified 2026-08-04, **history established 2026-08-17**. The flag suppresses the un-REGISTER and

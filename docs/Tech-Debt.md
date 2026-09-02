@@ -331,6 +331,47 @@ hop clears the sticky rejection instead of retrying into another 439.
   remaining half — pushing the Contact to the regc when outbound turns out unsupported — is still
   on the fork as [laconicman#7](https://github.com/laconicman/pjproject/pull/7).
 
+## TD-22 — TLS now fails fast at start, and our only recovery path is TD-19 · open (blocks TLS)
+Found while fixing the Apple TLS backends upstream, Aug 2026.
+
+pjproject [#5216](https://github.com/pjsip/pjproject/pull/5216) (merged) makes a TLS listener
+**validate its server certificate when the listener starts** rather than on the first inbound
+connection. The Apple/Network.framework backend we ship always behaved that way; the change
+brought the Darwin backend into line and settled the question upstream.
+
+- **What it buys us:** an unloadable certificate now fails `pjsua_transport_create()` directly,
+  instead of producing a listener that reports ready and then rejects every handshake. The error
+  arrives where it can be acted on.
+- **What it costs us:** there is no longer any implicit recovery. A certificate that only becomes
+  loadable *after* startup — a keychain unlocked late, a provisioning write, a rotated file —
+  requires an explicit `pjsip_tls_transport_restart()` / `pjsua_transport_lis_restart()`. That is
+  the contract we argued for upstream, on the grounds that it is the house convention
+  (`restart_listener()` in `pjsua_core.c` already reschedules itself on failure).
+- **Why that is a problem here:** **that call is TD-19.** `pjsua_transport_lis_restart()` is
+  modify-style and consumes a `pjsua_transport_config` whose defaults zero every TLS credential
+  field. So the one recovery path the upstream design assumes is the one we have already recorded
+  as silently dropping our credentials.
+- **Consequence:** TD-19 stops being latent the moment we ship TLS. Whoever adds a TLS transport
+  must carry the live `tls_setting` across a restart *before* relying on restart as recovery,
+  otherwise a transient certificate problem becomes a permanent one — the listener fails at start,
+  the retry restarts it without credentials, and mutual TLS is quietly off.
+- The same restart is also the only way to pick up a **rotated** certificate: the Apple backend
+  captures the identity in the listener's `nw_parameters` at start and never reloads it.
+
+Three further constraints from the same investigation, all recorded in
+[`swift-pjsip/docs/Apple-TLS-Backends.md`](../../swift-pjsip/docs/Apple-TLS-Backends.md):
+
+- `PJ_SSL_SOCK_IMP_APPLE` **requires the select ioqueue**. Every async event arrives via
+  `ssl_network_event_poll()`, whose only caller is `ioqueue_select.c`; with kqueue the build links
+  and no connection ever completes. Do not override `PJ_IOQUEUE_IMP`.
+- A `.p12` that loads on iOS **fails on macOS** — iOS imports the identity from the file, macOS
+  resolves the key through the keychain. This shapes how TLS can be tested at all.
+- `get_cert_info()` parses the **peer's** certificate on every handshake and has four unguarded
+  paths, one reached by SAN-only leaves that modern issuers emit routinely. Fixes are in review
+  upstream; until they land, peer certificates are input the library does not fully validate.
+
+- Refs: TD-19; pjproject #5216, #5222, #5224; `swift-pjsip/docs/Apple-TLS-Backends.md`.
+
 ## TD-21 — `disable_reg_on_modify` is not a safe "apply config quietly" switch · obligation
 Verified 2026-08-04, **history established 2026-08-17**. The flag suppresses the un-REGISTER and
 re-REGISTER, but `pjsua_acc_modify()` calls `destroy_regc(acc, PJ_TRUE)` on the `unreg_first` path

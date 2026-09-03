@@ -34,4 +34,18 @@ public enum PJSUAEvent: Sendable {
     /// still performs the low-level audio conference-bridge wiring itself; see
     /// `pjsuaOnCallMediaState`.
     case callMediaState(call: CallID, media: [CallMediaInfo])
+
+    /// A media stream was torn down, carrying the **final** statistics for it — read inside the
+    /// callback, where the stream is still fully constructed (`pjsua_aud.c` calls this before
+    /// `pjmedia_stream_destroy`). This is the only moment those counters exist: the stream
+    /// pointer is invalid immediately afterwards.
+    ///
+    /// One stream, not one call. A call that is held and resumed tears its stream down and
+    /// rebuilds it each time, so a single call yields several of these — see
+    /// `docs/Call-Termination-Paths.md` §1.1.
+    case streamDestroyed(call: CallID, mediaIndex: Int, statistics: CallStreamStatistics)
+
+    /// A `pjmedia_event` that pjsua forwarded to the application **without acting on it**. The
+    /// call is unaffected — see ``CallMediaEvent`` and `docs/Call-Termination-Paths.md` §3.
+    case callMediaEvent(call: CallID, mediaIndex: Int, event: CallMediaEvent)
 }

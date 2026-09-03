@@ -74,6 +74,8 @@ func installPJSUACallbacks(into cfg: inout pjsua_config) {
     cfg.cb.on_incoming_call    = { acc, callId, rx in pjsuaOnIncomingCall(acc, callId, rx) }
     cfg.cb.on_call_media_state = { callId        in pjsuaOnCallMediaState(callId) }
     cfg.cb.on_reg_state2       = { acc, info     in pjsuaOnRegState2(acc, info) }
+    cfg.cb.on_stream_destroyed = { callId, strm, idx in pjsuaOnStreamDestroyed(callId, strm, idx) }
+    cfg.cb.on_call_media_event = { callId, medIdx, ev in pjsuaOnCallMediaEvent(callId, medIdx, ev) }
 }
 
 /// Debug sanity check: every callback must arrive on a thread PJLIB has registered.
@@ -166,6 +168,65 @@ private func callMediaInfos(from info: inout pjsua_call_info) -> [CallMediaInfo]
             (0..<count).map { CallMediaInfo(base[$0]) }
         }
     }
+}
+
+/// The stream is about to be destroyed — this is the **only** point at which its final counters
+/// are readable, so they are read here rather than surfaced as a pointer the app could not
+/// safely use. `pjsua_aud_stop_stream()` invokes this while the stream is still fully
+/// constructed (`pjmedia_stream_destroy` runs afterwards) and with **`PJSUA_LOCK` held**, so the
+/// G2 rule matters more here than anywhere else: read POD, yield, return.
+///
+/// Not called for locally-hung-up calls whose teardown has already set `call->hanging_up`. That
+/// it *is* called for `pjsua_call_hangup()` depends on undocumented ordering in `pjsua_call.c` —
+/// the media deinit precedes the flag by three lines. `offhook` pins that with a regression test;
+/// see `docs/Call-Termination-Paths.md` §2.
+private func pjsuaOnStreamDestroyed(_ callId: pjsua_call_id,
+                                    _ stream: OpaquePointer?,
+                                    _ streamIndex: UInt32) {
+    assertOnRegisteredPJThread()
+    guard let stream else { return }
+    var stat = pjmedia_rtcp_stat()
+    guard pjmedia_stream_get_stat(stream, &stat).isSuccess else { return }
+
+    // Codec info is a separate read and a nice-to-have: a stream with no readable info still has
+    // counters worth keeping, so a failure here degrades to an unnamed codec rather than dropping
+    // the record.
+    var info = pjmedia_stream_info()
+    let codec: CallStreamStatistics.Codec
+    if pjmedia_stream_get_info(stream, &info).isSuccess {
+        codec = .init(name: info.fmt.encoding_name.string ?? "?",
+                      clockRate: info.fmt.clock_rate,
+                      channels: info.fmt.channel_cnt,
+                      payloadType: info.fmt.pt)
+    } else {
+        codec = .init(name: "?", clockRate: 0, channels: 0, payloadType: 0)
+    }
+
+    pjsuaEventSink?.yield(.streamDestroyed(
+        call: CallID(callId),
+        mediaIndex: Int(streamIndex),
+        statistics: CallStreamStatistics(kind: .audio,
+                                         codec: codec,
+                                         transmit: .init(stat.tx),
+                                         receive: .init(stat.rx),
+                                         roundTrip: .init(usec: stat.rtt))
+    ))
+}
+
+/// A `pjmedia_event` pjsua chose not to act on. Delivered on the **timer thread** — pjsua defers
+/// it through a 1 ms `pjsua_schedule_timer2` rather than delivering it on the media thread that
+/// published it — so this is the one callback in this file that does not share the others'
+/// threading context. See `docs/Threading-Validation.md`.
+private func pjsuaOnCallMediaEvent(_ callId: pjsua_call_id,
+                                   _ mediaIndex: UInt32,
+                                   _ event: UnsafeMutablePointer<pjmedia_event>?) {
+    assertOnRegisteredPJThread()
+    guard let event else { return }
+    pjsuaEventSink?.yield(.callMediaEvent(
+        call: CallID(callId),
+        mediaIndex: Int(mediaIndex),
+        event: CallMediaEvent(event.pointee)
+    ))
 }
 
 private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointer<pjsua_reg_info>?) {

@@ -1,3 +1,13 @@
+---
+area: coreaudio
+kind: enhancement
+status: merged
+verified: 65a7e0cba
+tracker:
+  issue: pjsip/pjproject#5177
+  pr: pjsip/pjproject#5178
+---
+
 # PR draft — configurable other-audio ducking for the CoreAudio VPIO unit
 
 For `pjsip/pjproject`. **Enhancement**, not a bug fix — no local workaround in swift-pjsua is
@@ -10,8 +20,8 @@ being retired; this is a behaviour improvement every VoIP app on the backend inh
 CodeQL, CIFuzz); the one non-green check was a Bitrise `DEN (timeout)` infra abort, unrelated.
 
 Third contribution from this fork to land upstream, after
-[#5070](pjproject-5070-acc-table-full-asserts-in-debug.md) and
-[#5076](pjproject-5076-warn-oversized-udp-fallback.md) — and the first that is an **enhancement**
+[#5070](acc-table-full-asserts-in-debug.md) and
+[#5076](warn-oversized-udp-fallback.md) — and the first that is an **enhancement**
 rather than a defect report.
 
 ### Review round 1 — sauwming, 2026-08-12 · *applied*

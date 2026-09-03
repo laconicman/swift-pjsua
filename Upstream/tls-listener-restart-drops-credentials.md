@@ -1,3 +1,10 @@
+---
+area: tls-listener
+kind: docs
+status: ready
+verified: c1ea7648
+---
+
 # `pjsua_transport_lis_restart()` on a TLS listener silently drops certificates when passed a defaulted config
 
 Upstream note for `pjsip/pjproject`. **Status: verified 2026-07-17 against master `c1ea7648`

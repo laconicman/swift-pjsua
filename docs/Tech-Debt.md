@@ -1,5 +1,13 @@
 # Tech debt & tracked deferrals
 
+> **2026-08-19 — one entry retired by measurement, not by work.** `PJSUA.start()` now sets
+> `pjsip_cfg()->endpt.disable_tcp_switch = 0`, because the prebuilt binary compiles
+> `PJSIP_DONT_SWITCH_TO_TCP 1` (the opposite of pjsip's default) and that silently prevented **any**
+> authenticated call from being placed over a UDP transport — the oversized resend fragmented and
+> vanished, at two independent providers. Runtime setting, no rebuild needed; the compile-time
+> macro should also be dropped when `swift-pjsip` is next rebuilt. Evidence:
+> `../../offhook/docs/SIP-Test-Infrastructure.md` §6.
+
 A register of known shortcuts, deferrals, and obligations in `swift-pjsua`. Each item is
 intentional and tracked — not an accidental gap. The **roadmap** (`Production-Roadmap.md`) holds the
 forward-looking milestone plan; this file is the backward-looking "what we knowingly owe."
@@ -38,7 +46,23 @@ the `CallRegistry` TTL sweep (TD/roadmap §6.5) withdraws stale *pending* report
 call relies on receiving its terminal event. Revisit the policy (unbounded vs. explicit
 back-pressure) during M4 hardening; the consumer is `await`-driven on the engine actor so sustained
 overflow is unlikely in practice.
-- Refs: <https://developer.apple.com/documentation/swift/asyncstream/continuation/bufferingpolicy>.
+
+**The stakes changed when `.streamDestroyed` was installed (TD-27), and this entry has to say so.**
+Every other event on this stream is a *notification about state the app can re-read* — a dropped
+`.callState` costs you the edge, not the fact, and the fact is still queryable. `.streamDestroyed`
+is the first event whose payload exists **nowhere else**: `CallStreamStatistics` is read from the
+`pjmedia_stream *` inside the callback, and the stream is destroyed 17 lines later
+(`pjsua_aud.c:573`). There is nothing to re-query. So overflow here is **data loss, not a missed
+notification**, and a teardown burst — the exact moment several calls end together — is when the
+buffer is most likely to overflow and when these events all arrive at once.
+
+That does not make `.bufferingNewest(64)` wrong today; it makes "is 64 enough" the wrong question.
+Whatever M4 decides, the sole-copy payload wants a policy that cannot silently drop it: a dedicated
+channel for statistics (TD-27's recommendation), unbounded buffering for that case, or moving the
+statistics off the event stream and into a store the app reads. Deciding it by tuning a number
+would be deciding it by accident.
+- Refs: <https://developer.apple.com/documentation/swift/asyncstream/continuation/bufferingpolicy>;
+  TD-27 for the sole-copy payload and the dedicated-channel recommendation.
 
 ## TD-4 — `CXProvider` captured by a `Sendable` actor · open (documented-safe)
 `CallSessionRouter` is an `actor` (hence `Sendable`) but holds a `CXProvider`, which is **not**
@@ -118,7 +142,7 @@ on 2026-08-11:
   other-audio ducking we contributed upstream ([#5178](https://github.com/pjsip/pjproject/pull/5178),
   filed 2026-08-11) — with a macOS 14+ floor a Mac slice can have voice-activity-driven ducking;
   below it, calls keep the old whole-call duck. See
-  [`Upstream/pjproject-5178-coreaudio-vpio-other-audio-ducking.md`](../Upstream/pjproject-5178-coreaudio-vpio-other-audio-ducking.md).
+  [`Upstream/coreaudio-vpio-other-audio-ducking.md`](../Upstream/coreaudio-vpio-other-audio-ducking.md).
 - **Nothing Apple-specific arrives by default — we must ask for it.** At the maintainer's request
   #5178 (merged 2026-08-17) ships with `PJMEDIA_AUDIO_DEV_COREAUDIO_ADVANCED_DUCKING` defaulting
   to `0`, switched on upstream only inside `config_site_sample.h`'s `PJ_CONFIG_IPHONE` block —
@@ -236,6 +260,69 @@ applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC
 - Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
   `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.
 
+## TD-27 — the engine cannot tell the app a call died without SIP signalling · partially discharged
+
+**2026-08-18: two of the four are installed** — `on_stream_destroyed` (as
+`PJSUAEvent.streamDestroyed`, carrying the final `CallStreamStatistics` read inside the callback)
+and `on_call_media_event` (as `PJSUAEvent.callMediaEvent` / ``CallMediaEvent``) — the minimum
+needed to *observe* the failure modes, per the sequencing note below. `on_transport_state` and
+`on_call_media_transport_state`/`on_ice_transport_error` remain unwired, and the local-hangup
+regression test now exists (`offhook` `test07`). The rest of this entry stands.
+
+We originally installed four callbacks. The consequence, mapped in
+[Call-Termination-Paths](./Call-Termination-Paths.md): **every path that ends a call is covered, and
+every path that kills a call *without ending it* is invisible.**
+
+- **`on_stream_destroyed`** — end-of-call per-stream statistics, and a trustworthy "media really
+  stopped" edge. Read the `pjmedia_stream *` **inside** the callback; it is destroyed 17 lines later
+  (`pjsua_aud.c:573`). Fires with **`PJSUA_LOCK` held** — see
+  [Threading-Validation](./Threading-Validation.md).
+- **`on_call_media_event`** — the only route to `PJMEDIA_EVENT_MEDIA_TP_ERR`. pjsua takes **no
+  action** on that event: it falls through `default: break` (`pjsua_media.c:1918-1919`) and the call
+  stays confirmed with dead media. Delivered on the **timer thread** via a 1 ms
+  `pjsua_schedule_timer2` (`:1942`), not the media thread.
+- **`on_transport_state`** — SIP transport up/down. Earliest available signal that anything is wrong.
+- **`on_call_media_transport_state` / `on_ice_transport_error`** — ICE keep-alive failure
+  (`pjsua_media.c:1107-1133`), the stack's only continuous media-liveness signal. Idle until ICE is
+  enabled (offhook OH-4), cheap to wire alongside the others.
+
+- **Cost.** A call whose transport or media dies silently is reported as healthy, forever — see
+  [Call-Termination-Paths](./Call-Termination-Paths.md) §4. Consumers cannot even implement their own
+  detection from what we currently emit, because none of the failure signals reach Swift.
+- **Discharge.** Install the four callbacks as `PJSUAEvent` cases (or, for statistics, a dedicated
+  channel — TD-3's `.bufferingNewest(64)` drops the *oldest*, and losing a record loses a whole
+  call's data). Plus a regression test pinning the `hanging_up` ordering
+  (`pjsua_call.c:3410-3414`): the deinit precedes the flag, which is the *only* reason local hangups
+  produce statistics at all, and nothing upstream promises it.
+- **Sequencing.** Install only what §3/§4 of `../../TASK-code-call-lifecycle-verification.md`
+  needs to observe, *after* that task's §2 has confirmed the premise live. The full callback set
+  is not worth wiring for a failure mode nobody has reproduced yet.
+- Refs: [Call-Termination-Paths](./Call-Termination-Paths.md); `../Upstream/no-transport-death-notification-for-established-calls.md`;
+  `../../offhook/docs/Call-Quality-Statistics.md`; relates TD-3, TD-24, TD-26.
+
+## TD-26 — we populate `pjsua_stream_stat.jbuf` and then discard it, along with jitter deviation · open
+
+`PJSUA+Statistics.swift` fills a `pjsua_stream_stat` and reads only `stat.rtcp`. That struct has
+**two** members (`pjsua.h:672-680` on `cb0544e0d`): `rtcp` *and* `pjmedia_jb_state jbuf`. We pay for
+the second and throw it away. `jbuf` (`pjmedia/include/pjmedia/jbuf.h:98-121`) carries `avg_delay`,
+`min_delay`, `max_delay`, **`dev_delay`** (stddev of delay, ms), **`avg_burst`** (average burst,
+frames), `lost`, `discard`, `empty`.
+
+Separately, `Distribution` mirrors `pj_math_stat` but exposes only `n/min/max/last/mean`, dropping
+the deviation pjlib already maintains in `m2_` (`pjlib/include/pj/math.h:81`) and exposes through
+the public inline `pj_math_stat_get_stddev()` (`math.h:177-181`).
+
+- **Cost.** Two diagnostics that cost nothing to surface are invisible to callers. `avg_burst` is
+  the only signal we have that loss arrived in clumps rather than scattered — perceptually a large
+  difference — and jitter mean without deviation cannot distinguish a steady 20 ms from a 20 ms mean
+  swinging +/-40 ms. Offhook's call-quality design leans on both
+  (`../../offhook/docs/Call-Quality-Statistics.md` §1.2, §6.4).
+- **Discharge.** Add `CallStreamStatistics.jitterBuffer` mirroring `pjmedia_jb_state`, and
+  `Distribution.sdMs` via `pj_math_stat_get_stddev()` (use the helper — it guards `n == 0` and keeps
+  our convention identical to pjsip's own reporting). Both are pure additions to a value type.
+- Refs: `offhook/docs/Call-Quality-Statistics.md` §§1.2/2.1/6.4/10.2; RFC 3611 §4.7 (the burst
+  metrics this approximates).
+
 ## TD-25 — `pjsip_regc` is mostly mutable in place; our mental model of `acc_modify` was too coarse · open (informational)
 From a DeepWiki deep consult 2026-08-17, verified against `sip_regc.h` / `sip_reg.c`. Only **five**
 pieces of `pjsip_regc` state have no public setter and therefore genuinely force a rebuild:
@@ -326,8 +413,8 @@ hop clears the sticky rejection instead of retrying into another 439.
 - **The app-side mitigation this entry used to prescribe is now unnecessary** — do not add it.
 - **Remains open until `swift-pjsip` ships a binary containing both commits** (TD-1 pins a branch,
   not a tag; the shipped binary is still 2.16-era). Until then a 439 in the field still bricks
-  registration. Bump checklist: `Upstream/reference-post-2.16-fixes-impact.md`.
-- Note: [`pjproject-5154`](../Upstream/pjproject-5154-439-first-hop-lacks-outbound.md). The
+  registration. Bump checklist: `Upstream/post-2.16-fixes-impact.md`.
+- Note: [`pjproject-5154`](../Upstream/439-first-hop-lacks-outbound.md). The
   remaining half — pushing the Contact to the regc when outbound turns out unsupported — is still
   on the fork as [laconicman#7](https://github.com/laconicman/pjproject/pull/7).
 
@@ -350,7 +437,7 @@ in both `pjsua.h` and `pjsua2/account.hpp`.
 - **Reassurance for our design:** #4509's rationale is the same shape as our pending-config slot
   drained on last-call-end — apply the settings, let the next registration pick them up. We simply
   have to own the re-registration.
-- Upstream note: [`draft-acc-modify-disable-reg-still-destroys-regc`](../Upstream/draft-acc-modify-disable-reg-still-destroys-regc.md);
+- Upstream note: [`acc-modify-disable-reg-still-destroys-regc`](../Upstream/acc-modify-disable-reg-still-destroys-regc.md);
   handoff: `VoIP/TASK-code-pjsip-disable-reg-on-modify.md`.
 
 ## TD-20 — RFC 8599 is app-side string work; pjsip implements none of it · open

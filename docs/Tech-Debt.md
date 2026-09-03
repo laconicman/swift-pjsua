@@ -236,7 +236,10 @@ applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC
 - Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
   `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.
 
-## TD-26 — `linkerSettings` is short three frameworks, which blocks app-hosted tests · open (found 2026-09-03)
+## TD-28 — `linkerSettings` is short three frameworks, which blocks app-hosted tests · open (found 2026-09-03)
+> Numbered 28, not 26: `feat/call-lifecycle-observation` (PR #11) already defines a different
+> TD-26 (discarded `jbuf` statistics) and a TD-27. The file has carried duplicate IDs before —
+> there were two TD-22s — so check the open branches before claiming the next number.
 `SwiftPJSUA` carries the `-framework` flags on behalf of everything that links the binary (the
 support-target pattern, roadmap §3.5) — and the list is incomplete. `libpjproject.a` contains
 `ios_opengl_dev.o`, whose `GLView` needs **OpenGLES** and **UIKit**, and raw **Metal** classes

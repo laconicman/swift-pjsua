@@ -40,7 +40,7 @@ TD-12 asks for, but it is a real one and it needs no app.
 **Simulator only, and not by choice.** Apple does not allow tool-hosted testing on device
 destinations, and a SwiftPM package test target cannot declare a host application — the setting
 does not exist in the manifest API — so these tests are tool-hosted by construction. Running any
-XCTest of this stack on a device needs a project with a host app, which is blocked on TD-26.
+XCTest of this stack on a device needs a project with a host app, which is blocked on TD-28.
 The device route today is `offhook`'s app-side auto-smoke:
 [`offhook/docs/Testing-Playbook.md`](../../offhook/docs/Testing-Playbook.md).
 

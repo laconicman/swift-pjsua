@@ -46,7 +46,23 @@ the `CallRegistry` TTL sweep (TD/roadmap §6.5) withdraws stale *pending* report
 call relies on receiving its terminal event. Revisit the policy (unbounded vs. explicit
 back-pressure) during M4 hardening; the consumer is `await`-driven on the engine actor so sustained
 overflow is unlikely in practice.
-- Refs: <https://developer.apple.com/documentation/swift/asyncstream/continuation/bufferingpolicy>.
+
+**The stakes changed when `.streamDestroyed` was installed (TD-27), and this entry has to say so.**
+Every other event on this stream is a *notification about state the app can re-read* — a dropped
+`.callState` costs you the edge, not the fact, and the fact is still queryable. `.streamDestroyed`
+is the first event whose payload exists **nowhere else**: `CallStreamStatistics` is read from the
+`pjmedia_stream *` inside the callback, and the stream is destroyed 17 lines later
+(`pjsua_aud.c:573`). There is nothing to re-query. So overflow here is **data loss, not a missed
+notification**, and a teardown burst — the exact moment several calls end together — is when the
+buffer is most likely to overflow and when these events all arrive at once.
+
+That does not make `.bufferingNewest(64)` wrong today; it makes "is 64 enough" the wrong question.
+Whatever M4 decides, the sole-copy payload wants a policy that cannot silently drop it: a dedicated
+channel for statistics (TD-27's recommendation), unbounded buffering for that case, or moving the
+statistics off the event stream and into a store the app reads. Deciding it by tuning a number
+would be deciding it by accident.
+- Refs: <https://developer.apple.com/documentation/swift/asyncstream/continuation/bufferingpolicy>;
+  TD-27 for the sole-copy payload and the dedicated-channel recommendation.
 
 ## TD-4 — `CXProvider` captured by a `Sendable` actor · open (documented-safe)
 `CallSessionRouter` is an `actor` (hence `Sendable`) but holds a `CXProvider`, which is **not**

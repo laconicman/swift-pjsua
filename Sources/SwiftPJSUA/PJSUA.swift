@@ -106,8 +106,13 @@ public actor PJSUA {
         // by range: an engine built against an older swift-pjsip would silently lose UDP calling
         // again, and re-asserting the pjsip default costs one store.
         //
-        // Set at runtime because the compile-time macro lives in a prebuilt binary, and here
-        // because `pjsip_cfg()` must be settled before `pjsua_init()` reads it.
+        // Set at runtime because the compile-time macro lives in a prebuilt binary. The
+        // placement is convention, not a requirement: `pjsua_init()` never reads this field.
+        // `pjsip_cfg()->endpt.disable_tcp_switch` (`pjsip/sip_config.h:111`) is read *per send*,
+        // in the RFC 3261 §18.1.1 block of `pjsip_endpt_send_request`'s path
+        // (`sip_util.c:1419`), so it only has to be settled before the first request leaves.
+        // Setting it beside the rest of the endpoint configuration is simply the earliest
+        // point at which it is obviously done once.
         pjsip_cfg().pointee.endpt.disable_tcp_switch = 0
 
         // 2. configure: callbacks + logging + media.

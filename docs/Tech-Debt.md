@@ -236,6 +236,30 @@ applied via `pjsip_cfg()` inside `start()` before `pjsua_init`; document the RFC
 - Refs: RFC 3261 §17.1.1.2 (Timer B) / §17.1.2.2 (Timer F); `sip_config.h` `pjsip_cfg_t.tsx`,
   `PJSIP_T1_TIMEOUT`/`PJSIP_TD_TIMEOUT`.
 
+## TD-28 — `linkerSettings` is short three frameworks, which blocks app-hosted tests · open (found 2026-09-03)
+> Numbered 28, not 26: `feat/call-lifecycle-observation` (PR #11) already defines a different
+> TD-26 (discarded `jbuf` statistics) and a TD-27. The file has carried duplicate IDs before —
+> there were two TD-22s — so check the open branches before claiming the next number.
+`SwiftPJSUA` carries the `-framework` flags on behalf of everything that links the binary (the
+support-target pattern, roadmap §3.5) — and the list is incomplete. `libpjproject.a` contains
+`ios_opengl_dev.o`, whose `GLView` needs **OpenGLES** and **UIKit**, and raw **Metal** classes
+(`MTLRenderPipelineDescriptor`, `MTLTextureDescriptor`) that `MetalKit` alone does not bring.
+
+- **Why nobody has hit it:** a SwiftUI *app* links UIKit and Metal anyway, so the app target
+  resolves them by accident. The gap only shows where the binary is linked without an app
+  around it.
+- **What it blocks:** app-hosting `offhook`'s test bundle, which is the only route to running
+  XCTest on a **device** (Apple forbids tool-hosted testing on device destinations, and a
+  SwiftPM package test target cannot declare a host app at all). Verified 2026-09-03: adding
+  the host app generates correctly and then fails to link on those symbols.
+- **Fix:** add `OpenGLES`, `UIKit` and `Metal` to `linkerSettings`, or stop compiling the
+  OpenGL video device into the artifact — it is dead weight next to the VideoToolbox/Metal
+  path we actually use, and `swift-pjsip`'s `config_site.h` is where that is decided.
+- **Not sufficient on its own.** Hosting also puts the tests inside a process whose app already
+  constructs a `PJSUA` and installs the global event sink, and pjsua is process-global. See the
+  playbook.
+- Refs: [`offhook/docs/Testing-Playbook.md`](../../offhook/docs/Testing-Playbook.md) §2.
+
 ## TD-25 — `pjsip_regc` is mostly mutable in place; our mental model of `acc_modify` was too coarse · open (informational)
 From a DeepWiki deep consult 2026-08-17, verified against `sip_regc.h` / `sip_reg.c`. Only **five**
 pieces of `pjsip_regc` state have no public setter and therefore genuinely force a rebuild:
@@ -331,8 +355,9 @@ hop clears the sticky rejection instead of retrying into another 439.
   remaining half — pushing the Contact to the regc when outbound turns out unsupported — is still
   on the fork as [laconicman#7](https://github.com/laconicman/pjproject/pull/7).
 
-## TD-22 — TLS now fails fast at start, and our only recovery path is TD-19 · open (blocks TLS)
-Found while fixing the Apple TLS backends upstream, Aug 2026.
+## TD-22 — TLS now fails fast at start, and our only recovery path is TD-19 · open (blocks TLS) · **measured 2026-09-01**
+Found while fixing the Apple TLS backends upstream, Aug 2026; the runtime behaviour below was
+observed on the Simulator on 2026-09-01 (`Tests/SwiftPJSUATests/TLSTransportTests.swift`).
 
 pjproject [#5216](https://github.com/pjsip/pjproject/pull/5216) (merged) makes a TLS listener
 **validate its server certificate when the listener starts** rather than on the first inbound
@@ -371,6 +396,63 @@ Three further constraints from the same investigation, all recorded in
   upstream; until they land, peer certificates are input the library does not fully validate.
 
 - Refs: TD-19; pjproject #5216, #5222, #5224; `swift-pjsip/docs/Apple-TLS-Backends.md`.
+
+### What was actually measured
+
+Xcode 26.6 (17F113), iPhone 17 Pro simulator, **iOS 26.5**, PJSIP 2.17.0 (`288de6142`) via
+`swift-pjsip` 0.2.1. Device not tested — every claim here is Simulator-only. (The earlier session
+saw behaviour differ between iPhoneOS 26.2 and 26.5, so treat the SDK stamp as load-bearing.)
+
+| what | observed |
+|---|---|
+| valid `.p12` + correct password | listener ready, ephemeral port — the positive control works, and only on iOS |
+| certificate path that does not exist | `pjsua_transport_create()` fails, `PJ_EINVAL`; log `Failed opening file` / `Failed reading cert file` |
+| file that is not a PKCS#12 | `pjsua_transport_create()` fails, status 496275; log `Apple SSL error SecItemImport [-26275]: Unable to decode the provided data` |
+| valid `.p12` of 12 205 bytes | **fails, same `-26275`** — the 8 KB truncation is still in our binary, so pjproject#5222 has not arrived |
+| restart with a defaulted config | `PJ_SUCCESS`, listener re-binds on a new port, credentials gone (TD-19) |
+| restart with an unloadable certificate | fails — which is what proves the row above is a real drop and not a preserved setting |
+
+So #5216's eager behaviour is exactly as advertised on the backend we ship: a bad certificate is a
+`pjsua_transport_create()` error, not a mystery at first connection. **What is not as advertised is
+the recovery.**
+
+### The recovery path does not recover
+
+"Call restart, reschedule on failure" is the recipe — `restart_listener()` in `pjsua_core.c` is the
+model, and it is what we argued for upstream. Measured, it does not work through
+`pjsua_transport_lis_restart()`:
+
+1. a credential-carrying restart that fails has already run `pj_ssl_sock_close()` and set
+   `listener->ssock = NULL`, and has already freed `listener->cert`;
+2. every later restart therefore takes `pjsip_tls_transport_restart2()`'s
+   `if (!listener->ssock)` branch — *"TLS restart requested while no listener created, update the
+   published address only"* — which copies the new settings, **does not reload the certificate,
+   does not re-open the socket, and returns `PJ_SUCCESS`**;
+3. so the scheduled retry reports success forever while the listener stays down. Observed:
+   the port stays at 0 after the "successful" retry
+   (`testRestartAfterAFailedRestartReportsSuccessWithoutRecovering`).
+
+The only route back appears to be destroying the transport and creating a new one. That has to be
+settled before we ship TLS, because the whole fail-fast design is premised on restart being a
+usable recovery.
+
+**Upstream: filed, not fixed.** All three went into
+[pjproject#5232](https://github.com/pjsip/pjproject/issues/5232) — a register rather than a
+request, since none is blocking and the PR series was already carrying review load:
+- **§5** — `restart2`'s no-listener branch should re-open the listener, or at minimum not report
+  success. This is the one with teeth: it makes an unrecoverable listener indistinguishable from
+  a working one, on the path #5216 made the documented recovery.
+- **§6** — `restart2` handles three credential branches (files, buffer, store) as `else if`;
+  listener start handles **four** independent `if`s including `cert_direct`. A `cert_direct`
+  listener cannot be restored by any restart. See TD-19.
+- **§7** — `ssl_sock_apple.m` reports every import failure as `"Apple SSL error SecItemImport"`,
+  but iOS takes the `SecPKCS12Import()` branch. Cosmetic, one string, and it sends anyone
+  debugging a `.p12` to the wrong API's documentation.
+
+**None of this is fixed for us either way.** The eight-PR Apple-TLS series merged upstream on
+2026-09-02 — including #5222, the 8 KB fix — but our binary is pinned at 2.17.0 (`288de6142`),
+which predates all of it. The measurements above stand until a `swift-pjsip` rebuild, and the
+oversized-`.p12` test is what will tell us the rebuild happened.
 
 ## TD-21 — `disable_reg_on_modify` is not a safe "apply config quietly" switch · obligation
 Verified 2026-08-04, **history established 2026-08-17**. The flag suppresses the un-REGISTER and
@@ -431,7 +513,7 @@ push notification" in that case, the opposite of what pjsua's timer does (§7.2)
 `contact_uri_params` is per-account and per-dialog is what RFC 8599 §6.1.1 requires. Note also that
 RFC 5626 *is* implemented and on by default (§7.4) — see TD-22 for the gap that creates.
 
-## TD-19 — a TLS listener restart would silently drop its credentials · open (latent; M2)
+## TD-19 — a TLS listener restart silently drops its credentials · **confirmed by runtime test 2026-09-01** · open (blocks TLS)
 Found by the 2026-07-17 config-struct misuse sweep
 ([conversation](https://deepwiki.com/search/misuse-sweep-for-that-same-cla_bb8d7a19-cc1b-44fb-bd24-32dd7d442b8e?mode=deep)),
 the same bug class as D-CONFIG-4. `pjsua_transport_lis_restart()` is a **modify-style** API that
@@ -439,14 +521,53 @@ consumes `pjsua_transport_config` including `tls_setting` — and
 `pjsua_transport_config_default()` zeroes every TLS credential field (`cert_file`,
 `privkey_file`, `password`, `ciphers`). Restarting a TLS listener with a freshly-defaulted struct
 therefore **silently disables mutual TLS**.
-- **Not a bug today:** `start()` only ever calls `pjsua_transport_create` (create-style, where a
-  fresh default is correct), and we ship no TLS transport yet.
-- **Why it is queued rather than ignored:** the M2 IP-change milestone calls
-  `pjsua_handle_ip_change()`, which internally restarts every registered listener — including
-  `pjsip_tls_transport_restart`. Whoever adds TLS + IP-change must carry the live `tls_setting`
-  across the restart (save our own copy or read it back), not rebuild it.
-- Refs: capability map "IP/network-change" (M2); `pjsua_transport_lis_restart` docs;
-  `docs/Configuration-Design.md` D-CONFIG-4 for the general rule.
+
+**No longer latent, and no longer analysis.** `Tests/SwiftPJSUATests/TLSTransportTests.swift`
+(`testListenerRestartReplacesCredentialsRatherThanPreservingThem`) reproduces it on the
+Simulator. Measured on Xcode 26.6 (17F113) / iPhone 17 Pro / **iOS 26.5**, PJSIP 2.17.0
+(`288de6142`) via `swift-pjsip` 0.2.1:
+
+- create with a valid `.p12` → listener ready on an ephemeral port (`tlstp:63153`);
+- restart with a **freshly-defaulted** config → `PJ_SUCCESS`, and the listener really re-binds
+  (`tlstp:63154`, a new port) — no error, no warning, nothing in the log to say the security
+  posture changed;
+- restart with a config naming an **unloadable** certificate → fails (`PJ_EINVAL`).
+
+The third line is what makes the second mean something: had `cfg->tls_setting` been ignored in
+favour of the listener's own, the unloadable certificate would have been ignored too and that
+restart would have succeeded as well. It does not, so the config is what the listener ends up
+with — and a defaulted one leaves it with nothing.
+
+- **Correction to this entry's original reasoning.** It said the M2 IP-change milestone walks
+  into this because `pjsua_handle_ip_change()` restarts every listener. **That part is wrong and
+  is withdrawn.** `restart_listener()` (`pjsua_core.c`) calls the *three-argument*
+  `pjsip_tls_transport_restart()`, which is `restart2(factory, NULL, …)`, and a `NULL` `opt`
+  skips the wipe-and-copy block entirely — credentials preserved by construction.
+  **`pjsua_handle_ip_change()` cannot drop TLS credentials.** The hazard is only ever *our own*
+  call to `pjsua_transport_lis_restart()`, which is exactly the recovery path TD-22 needs.
+- **Blast radius is wider than the listener.** `lis_create_transport()` takes the *client*
+  certificate for outbound connections from the same `listener->cert`
+  (`pj_ssl_sock_set_certificate(ssock, pool, listener->cert)`), so losing it also stops the UA
+  presenting a client certificate to a provider. For a softphone that is the case that matters:
+  the visible symptom is not "we stopped accepting inbound TLS", it is "the registrar stopped
+  authenticating us", one restart later.
+- **There is no preserving path through the pjsua API.** `pjsua_transport_lis_restart()` always
+  passes `&cfg->tls_setting`, never `NULL`. `pjsua_transport_lis_start()` does leave
+  `tls_setting`/`cert` untouched, but returns `PJ_SUCCESS` immediately when the socket is already
+  up, so it is not a substitute. **Whoever adds TLS must keep our own copy of the live
+  `pjsua_transport_config` and re-supply it on every restart** — there is nothing to read it back
+  from.
+- **Do not build the credential surface on `cert_direct`.** Listener start has four credential
+  branches (files, buffer, store, `cert_direct`); `restart2` has three and **no `cert_direct`**
+  (confirmed at `288de6142`). A listener configured that way cannot have its certificate restored
+  by a restart even when the settings are re-supplied faithfully. Use `cert_file` (or `cert_buf`).
+- **Discharge condition:** either upstream gives `pjsua_transport_lis_restart()` a way to say
+  "keep what you have", or our TLS transport surface carries the live config across restarts and
+  a test proves it. Not before.
+- Refs: TD-22 (why this stops being avoidable); `Upstream/draft-tls-listener-restart-drops-credentials.md`;
+  `docs/Configuration-Design.md` D-CONFIG-4 for the general rule; DeepWiki deep consult
+  ([conversation](https://deepwiki.com/search/design-question-about-tls-list_c88a6faf-8491-407d-a80a-4f4a03d46d05?mode=deep),
+  `query_id` `design-question-about-tls-list_c88a6faf-8491-407d-a80a-4f4a03d46d05`).
 
 ## TD-18 — transport port model · **discharged 2026-07-17** (fail-fast note still stands)
 `Configuration.transports: [TransportConfiguration]` gives each transport its own kind and port

@@ -1,5 +1,7 @@
 # swift-pjsua
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/laconicman/swift-pjsua)
+
 An idiomatic, **Swift-only async** wrapper over PJSIP's high-level **C** API (pjsua1),
 built on the prebuilt [`swift-pjsip`](https://github.com/laconicman/swift-pjsip) binary.
 

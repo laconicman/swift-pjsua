@@ -10,12 +10,15 @@ Status legend: **open** (owed), **deferred-PR-b** (scheduled for the video/confe
 
 ---
 
-## TD-1 — `swift-pjsip` dependency tracks a branch, not a tag · open
+## TD-1 — `swift-pjsip` dependency tracks a branch, not a tag · **discharged 2026-09 (pinned to `"0.2.1" ..< "0.3.0"`)**
 `Package.swift` depends on `swift-pjsip` at branch `main`, so a resolve can pull a moving binary and
 builds aren't reproducible. Pin to a semantic-version tag once `swift-pjsip` cuts a release
 (binary `.xcframework` distribution should be versioned — see the org's *XCFramework distribution*
 knowledge). Until then, `Package.resolved` is the only thing pinning the revision.
 - Refs: <https://www.swift.org/documentation/package-manager/>; SemVer <https://semver.org/>.
+- **Resolved:** the dependency is now the SemVer range `"0.2.1" ..< "0.3.0"` — only releases
+  where the binary itself is untouched can resolve under us (see the pin's comment in
+  `Package.swift`).
 
 ## TD-2 — push payload schemas are placeholders · open
 Both push entry points parse a **placeholder** schema that must be matched to the real server
@@ -336,7 +339,7 @@ changed), or tolerate `PJSIP_EBUSY` there. **Needs a runtime test to confirm the
 analysis is static; `pjsua_acc_modify` returns only after `pjsip_regc_send`, but whether `has_tsx`
 is still set by the time we call depends on transport speed.
 
-## TD-22 — a 439 (First Hop Lacks Outbound Support) left us permanently unregistered · **discharged upstream 2026-08 (pending a PJSIP bump)**
+## TD-22 — a 439 (First Hop Lacks Outbound Support) left us permanently unregistered · **discharged 2026-09 (in the shipped binary since swift-pjsip 0.2.1)**
 Verified 2026-08-04 against local master `4896a5e6a`. `use_rfc5626` defaults to `PJ_TRUE`, so on
 TCP/TLS pjsua sends `;reg-id` + `Supported: outbound` — exactly the combination RFC 5626 §6
 requires a registrar to answer with **439** when the first hop does not add `Path: <…;ob>`. pjsip
@@ -350,9 +353,9 @@ downgraded — so every subsequent attempt got 439 too.
 `first_hop_changed` + `reset_outbound_rejection()` in `pjsua_acc_modify()`, so changing the first
 hop clears the sticky rejection instead of retrying into another 439.
 - **The app-side mitigation this entry used to prescribe is now unnecessary** — do not add it.
-- **Remains open until `swift-pjsip` ships a binary containing both commits** (TD-1 pins a branch,
-  not a tag; the shipped binary is still 2.16-era). Until then a 439 in the field still bricks
-  registration. Bump checklist: `Upstream/reference-post-2.16-fixes-impact.md`.
+- **Now in the shipped binary:** `swift-pjsip` 0.2.1 (PJSIP 2.17.0, `288de6142`) contains both
+  commits — verified by ancestry (`77ad3feec`, `716ef557d` are ancestors of the tagged base).
+  Bump checklist: `Upstream/reference-post-2.16-fixes-impact.md`.
 - Note: [`pjproject-5154`](../Upstream/pjproject-5154-439-first-hop-lacks-outbound.md). The
   remaining half — pushing the Contact to the regc when outbound turns out unsupported — is still
   on the fork as [laconicman#7](https://github.com/laconicman/pjproject/pull/7).
@@ -381,8 +384,10 @@ brought the Darwin backend into line and settled the question upstream.
   as silently dropping our credentials.
 - **Consequence:** TD-19 stops being latent the moment we ship TLS. Whoever adds a TLS transport
   must carry the live `tls_setting` across any restart *before* relying on restart as recovery —
-  an existing listener restarted with zeroed credentials (rotation, IP change) silently drops
-  mutual TLS, and a listener that failed to start must be re-*created*, not restarted.
+  an existing listener restarted with a defaulted config silently drops mutual TLS, and a
+  listener that failed to start must be re-*created*, not restarted. (`pjsua_handle_ip_change()`
+  is **not** such a restart — its three-argument `pjsip_tls_transport_restart()` preserves
+  credentials; see TD-19's correction.)
 - The same restart is also the only way to pick up a **rotated** certificate: the Apple backend
   captures the identity in the listener's `nw_parameters` at start and never reloads it.
 

@@ -32,9 +32,9 @@ public actor PJSUA {
 
     /// Guaranteed-delivery channel for the unrecoverable subset — `.incomingCall`,
     /// `.callState`, `.callMediaState`, `.streamDestroyed`, every `.registrationState`
-    /// (one ordered authoritative path for account state), and one-shot media errors —
-    /// each also delivered to ``events``. Unbounded by design: per-call events grow only
-    /// with call activity, and registration renewals are ~1/expiry-interval per account,
+    /// *transition* (the single ordered, authoritative path for account state — identical
+    /// renewal heartbeats stay on ``events`` only), and one-shot media errors — each also
+    /// delivered to ``events``. Unbounded by design: only real state changes land here,
     /// so an idle engine produces nothing.
     public nonisolated let callEvents: AsyncStream<PJSUAEvent>
 

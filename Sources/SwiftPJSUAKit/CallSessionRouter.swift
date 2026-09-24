@@ -32,7 +32,7 @@ public actor CallSessionRouter {
     /// a `CXStartCallAction` arriving while it is `nil` fails (nowhere to place the call from).
     private var outgoingAccount: AccountID?
 
-    /// App-facing relay of `.registrationState` events. The router consumes the engine streams
+    /// App-facing relay of `.registrationState` transitions. The router consumes the engine streams
     /// **exclusively** (they are single-consumer), and registration has no CallKit mapping (§3) —
     /// so the app's account UI observes it here instead of reading `engine.events` itself.
     ///
@@ -52,7 +52,7 @@ public actor CallSessionRouter {
     ///
     /// Delivery semantics mirror the engine's channels exactly: call-scoped events
     /// (`.incomingCall`, `.callState`, `.callMediaState`, `.streamDestroyed`), **every**
-    /// `.registrationState`, and one-shot media errors (`.mediaTransportError`,
+    /// `.registrationState` transitions, and one-shot media errors (`.mediaTransportError`,
     /// `.audioDeviceError`) arrive on the guaranteed channel — unbounded, ordered, never
     /// dropped; periodic `.callMediaEvent(.other)` arrives on the bounded telemetry channel
     /// and may drop under burst. Each event is delivered **once**: lossy `events` copies of
@@ -82,13 +82,28 @@ public actor CallSessionRouter {
     /// The observer is captured at enqueue time: a later `set…Observer` doesn't redirect
     /// already-queued deliveries.
     private var observerTail: Task<Void, Never>?
+    /// Queued-but-undelivered observer callbacks — bounds the task chain: a wedged
+    /// `@MainActor` observer otherwise turns periodic telemetry into unbounded task growth.
+    private var pendingObserverDeliveries = 0
+    /// Backlog depth at which droppable deliveries are skipped. Sized with the telemetry
+    /// stream in mind — deeper than this means the observer is wedged, not busy.
+    private static let maxPendingObserverDeliveries = 32
 
-    /// Enqueue a `@MainActor` observer delivery without awaiting it.
-    private func deliverToObserver(_ delivery: @escaping @MainActor @Sendable () -> Void) {
+    /// Enqueue a `@MainActor` observer delivery without awaiting it. `droppingIfBusy`
+    /// marks the delivery as best-effort telemetry: when the backlog is deep, periodic
+    /// events are skipped rather than piled onto the chain — the same loss trade the
+    /// bounded `events` stream already makes for them.
+    private func deliverToObserver(droppingIfBusy: Bool = false,
+                                   _ delivery: @escaping @MainActor @Sendable () -> Void) {
+        if droppingIfBusy && pendingObserverDeliveries >= Self.maxPendingObserverDeliveries {
+            return
+        }
+        pendingObserverDeliveries += 1
         let previous = observerTail
         observerTail = Task {
             await previous?.value
             await delivery()
+            pendingObserverDeliveries -= 1
         }
     }
 
@@ -392,15 +407,18 @@ public actor CallSessionRouter {
         }
     }
 
-    /// The bounded `events` stream is lossy copies only: every case that also lands on
-    /// `callEvents` (call-scoped events, **all** registration reports, one-shot media
-    /// errors) has its authoritative delivery there, so nothing here is re-acted on or
-    /// re-forwarded. The one telemetry-exclusive payload is `.callMediaEvent(.other)` —
-    /// periodic, informational, and safe to lose under burst.
+    /// The bounded `events` stream is either lossy twins or heartbeat: every case that
+    /// lands on `callEvents` (call-scoped events, registration *transitions*, one-shot
+    /// media errors) has its authoritative delivery there, and identical renewal
+    /// heartbeats are telemetry-exclusive but deliberately unrelayed — observers track
+    /// transitions, not pulse. The one payload forwarded from here is
+    /// `.callMediaEvent(.other)` — periodic, informational, and droppable under backlog.
     /// Internal (not `private`) for the same @testable reason as ``handle(_:)``.
     func handleTelemetry(_ event: PJSUAEvent) async {
         if case .callMediaEvent(_, _, .other) = event {
-            deliverToObserver { [eventObserver] in eventObserver?(event) }
+            deliverToObserver(droppingIfBusy: true) { [eventObserver] in
+                eventObserver?(event)
+            }
         }
     }
 

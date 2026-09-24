@@ -49,6 +49,7 @@ final class EventRelayTests: XCTestCase {
         await router.setEventObserver { event in collector.observe(event) }
 
         await router.handle(streamDestroyedEvent(call: CallID(0)))
+        await router.drainObservers()
 
         let observed = await collector.events
         XCTAssertEqual(observed.count, 1)
@@ -66,6 +67,7 @@ final class EventRelayTests: XCTestCase {
 
         await router.handleTelemetry(.callMediaEvent(call: CallID(0), mediaIndex: 0,
                                                      event: .other(fourCC: "TEST")))
+        await router.drainObservers()
 
         let observed = await collector.events
         XCTAssertEqual(observed.count, 1)
@@ -86,6 +88,7 @@ final class EventRelayTests: XCTestCase {
                                                                           isRTP: true))
         await router.handle(error)          // guaranteed copy — delivers
         await router.handleTelemetry(error) // lossy twin — ignored
+        await router.drainObservers()
 
         let observed = await collector.events
         XCTAssertEqual(observed.count, 1,
@@ -106,6 +109,7 @@ final class EventRelayTests: XCTestCase {
                                                   statusCode: 403, expiration: 0)
         await router.handle(terminal)          // authoritative copy — delivers
         await router.handleTelemetry(terminal) // lossy twin — ignored entirely
+        await router.drainObservers()
 
         let observed = await collector.events
         XCTAssertEqual(observed.count, 1,
@@ -124,6 +128,7 @@ final class EventRelayTests: XCTestCase {
 
         await router.handleTelemetry(.registrationState(account: AccountID(0), active: true,
                                                         statusCode: 200, expiration: 300))
+        await router.drainObservers()
 
         let observed = await collector.events
         let regCount = await collector.registrations.count
@@ -145,6 +150,7 @@ final class EventRelayTests: XCTestCase {
                                                statusCode: 200, expiration: 300))
         await router.handle(.registrationState(account: account, active: true,
                                                statusCode: 200, expiration: 60))
+        await router.drainObservers()
 
         let observed = await collector.events
         XCTAssertEqual(observed.count, 2,
@@ -168,6 +174,7 @@ final class EventRelayTests: XCTestCase {
         // ...the ID is recycled, and the new account's first report is identical.
         await router.handle(.registrationState(account: account, active: false,
                                                statusCode: 403, expiration: 0))
+        await router.drainObservers()
 
         let relayed = await collector.registrations
         XCTAssertEqual(relayed.count, 2,
@@ -183,6 +190,7 @@ final class EventRelayTests: XCTestCase {
 
         await router.handleTelemetry(.callState(call: CallID(0), state: .confirmed,
                                                 sipCallID: "x@y", lastStatus: 200))
+        await router.drainObservers()
 
         let observed = await collector.events
         XCTAssertTrue(observed.isEmpty,

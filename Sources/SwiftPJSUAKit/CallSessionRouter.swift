@@ -75,6 +75,30 @@ public actor CallSessionRouter {
     }
     private var lastRegistrationRelay: [AccountID: RegistrationSnapshot] = [:]
 
+    /// Serial delivery chain for observer callbacks. Both observer types are `@MainActor`,
+    /// and `handle` must never block CallKit work on app code (a slow observer awaiting a
+    /// main-actor hop could delay an incoming-call report). Each delivery chains behind the
+    /// previous one, so observers still see the router's order — they just can't stall it.
+    /// The observer is captured at enqueue time: a later `set…Observer` doesn't redirect
+    /// already-queued deliveries.
+    private var observerTail: Task<Void, Never>?
+
+    /// Enqueue a `@MainActor` observer delivery without awaiting it.
+    private func deliverToObserver(_ delivery: @escaping @MainActor @Sendable () -> Void) {
+        let previous = observerTail
+        observerTail = Task {
+            await previous?.value
+            await delivery()
+        }
+    }
+
+    /// Suspend until every queued observer delivery has run. Internal for `@testable` —
+    /// production callers must not await observer work (that would re-couple the paths
+    /// ``deliverToObserver`` decouples).
+    func drainObservers() async {
+        await observerTail?.value
+    }
+
     /// Connection-establishing / hold actions awaiting the engine event that resolves them.
     /// Keyed by CallKit `UUID`; at most one outstanding per call in this skeleton (answer→hold are
     /// temporally exclusive). See ``PendingCallAction``.
@@ -329,7 +353,7 @@ public actor CallSessionRouter {
         // with it. `.registrationState` is excluded here — it reaches the tap through the
         // transition-deduplicated ``relayRegistration`` path instead.
         if case .registrationState = event { } else {
-            await eventObserver?(event)
+            deliverToObserver { [eventObserver] in eventObserver?(event) }
         }
         switch event {
         case let .incomingCall(_, call, sipCallID, from, offeredVideo):
@@ -376,7 +400,7 @@ public actor CallSessionRouter {
     /// Internal (not `private`) for the same @testable reason as ``handle(_:)``.
     func handleTelemetry(_ event: PJSUAEvent) async {
         if case .callMediaEvent(_, _, .other) = event {
-            await eventObserver?(event)
+            deliverToObserver { [eventObserver] in eventObserver?(event) }
         }
     }
 
@@ -391,9 +415,11 @@ public actor CallSessionRouter {
                                             expiration: expiration)
         guard lastRegistrationRelay[account] != snapshot else { return }
         lastRegistrationRelay[account] = active ? snapshot : nil
-        await registrationObserver?(account, active, statusCode, expiration)
-        await eventObserver?(.registrationState(account: account, active: active,
-                                                statusCode: statusCode, expiration: expiration))
+        deliverToObserver { [registrationObserver, eventObserver] in
+            registrationObserver?(account, active, statusCode, expiration)
+            eventObserver?(.registrationState(account: account, active: active,
+                                              statusCode: statusCode, expiration: expiration))
+        }
     }
 
     private func handleCallState(call: CallID, state: CallState, lastStatus: Int32) async {

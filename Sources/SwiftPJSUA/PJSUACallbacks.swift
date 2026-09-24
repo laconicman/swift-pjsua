@@ -77,10 +77,15 @@ func makePJSUAEventStreams() -> (events: AsyncStream<PJSUAEvent>,
     return (events, callEvents)
 }
 
-/// Finish the event streams (called from `PJSUA.shutdown`).
+/// Finish the event streams (called from `PJSUA.shutdown`). Also resets the registration
+/// dedup state — a restarted engine's account slots are fresh, so stale tuples must not
+/// suppress the first reports of a new engine lifetime.
 func finishPJSUAEventStreams() {
     pjsuaEventSink?.finish()
     pjsuaCallEventSink?.finish()
+    regDedupLock.lock()
+    lastEmittedRegState.removeAll()
+    regDedupLock.unlock()
 }
 
 /// Telemetry yield: the bounded `events` stream only.
@@ -267,6 +272,16 @@ private func pjsuaOnCallMediaEvent(_ callId: pjsua_call_id,
     }
 }
 
+/// Last registration tuple emitted per account slot. Renewals repeat an identical report
+/// every expiry interval; only *transitions* go on the unbounded `callEvents` channel, so
+/// an idle-but-registered engine buffers nothing there (the raw heartbeat still reaches the
+/// bounded `events` stream for the record). Cleared on a terminal report: the epoch ended,
+/// and a recycled `pjsua_acc_id` must not inherit the previous account's dedup state.
+/// Guarded by `regDedupLock` — reg callbacks may arrive on different PJSUA worker threads.
+private let regDedupLock = NSLock()
+private var lastEmittedRegState: [pjsua_acc_id: (active: Bool, code: Int32,
+                                               expiration: UInt32)] = [:]
+
 private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointer<pjsua_reg_info>?) {
     assertOnRegisteredPJThread()
     guard let regInfo = info?.pointee else {
@@ -287,16 +302,24 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     // "Active" = a renewing registration that the server accepted (2xx) with a live
     // expiration. A successful un-REGISTER (renewing == false, expiration == 0) is inactive.
     let active = renewing && (Int32(PJSIP_SC_OK.rawValue) ..< 300).contains(statusCode) && expiration > 0
-    // Every registration report goes on the guaranteed channel: it is the single ordered,
-    // authoritative path for account state — terminals because they are one-shot, renewals
-    // because splitting the sequence across two independently-drained streams would let a
-    // consumer observe them out of order. Renewals are ~1/expiry-interval per account, far
-    // below call volume, so the unbounded stream stays cheap. (`emitCall` still writes the
-    // lossy `events` twin for record completeness; the router ignores it.)
-    emitCall(.registrationState(
+    // Every registration *transition* goes on the guaranteed channel — the single ordered,
+    // authoritative path for account state. Identical renewal heartbeats emit only to the
+    // bounded `events` record: they are periodic, self-replacing, and would otherwise grow
+    // the unbounded `callEvents` buffer forever when nobody consumes it.
+    let event = PJSUAEvent.registrationState(
         account: AccountID(accId),
         active: active,
         statusCode: statusCode,
         expiration: expiration
-    ))
+    )
+    regDedupLock.lock()
+    let tuple = (active: active, code: statusCode, expiration: expiration)
+    let duplicate = lastEmittedRegState[accId].map { $0 == tuple } ?? false
+    lastEmittedRegState[accId] = active ? tuple : nil
+    regDedupLock.unlock()
+    if duplicate {
+        emit(event) // heartbeat — record only, not lifecycle
+    } else {
+        emitCall(event)
+    }
 }

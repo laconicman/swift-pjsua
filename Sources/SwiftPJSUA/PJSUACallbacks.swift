@@ -286,6 +286,11 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     assertOnRegisteredPJThread()
     guard let regInfo = info?.pointee else {
         // No reg_info at all is a terminal report — guaranteed channel (see below).
+        // It also ends the epoch: clear the dedup entry or a later recovery whose tuple
+        // happens to equal the cached active one would emit only to the lossy stream.
+        regDedupLock.lock()
+        lastEmittedRegState[accId] = nil
+        regDedupLock.unlock()
         emitCall(.registrationState(
             account: AccountID(accId), active: false, statusCode: 0, expiration: 0
         ))

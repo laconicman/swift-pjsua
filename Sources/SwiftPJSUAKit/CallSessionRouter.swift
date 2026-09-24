@@ -47,26 +47,27 @@ public actor CallSessionRouter {
     /// App-facing relay of **every** event the router processes — the multicast tap that makes
     /// the single-consumer streams observable (diagnostics views, media-error policy, the
     /// FieldKit harness). Without it, events the router handles but doesn't map to CallKit
-    /// (`.streamDestroyed`, `.callMediaEvent`, terminal `.registrationState`) are invisible to
+    /// (`.streamDestroyed`, `.callMediaEvent`, `.registrationState`) are invisible to
     /// the app: an `AsyncStream` cannot broadcast a consumed event to a second subscriber.
     ///
     /// Delivery semantics mirror the engine's channels exactly: call-scoped events
-    /// (`.incomingCall`, `.callState`, `.callMediaState`, `.streamDestroyed`, and terminal
-    /// `.registrationState`) arrive on the guaranteed channel — unbounded, ordered, never
-    /// dropped; periodic `.registrationState` renewals and `.callMediaEvent` arrive on the
-    /// bounded telemetry channel and may drop under burst. Each event is delivered **once**:
-    /// the lossy `events` copies of call-scoped events are consumed by the router but not
-    /// re-forwarded, and dual-channel `.registrationState` reports are deduplicated
+    /// (`.incomingCall`, `.callState`, `.callMediaState`, `.streamDestroyed`), **every**
+    /// `.registrationState`, and one-shot media errors (`.mediaTransportError`,
+    /// `.audioDeviceError`) arrive on the guaranteed channel — unbounded, ordered, never
+    /// dropped; periodic `.callMediaEvent(.other)` arrives on the bounded telemetry channel
+    /// and may drop under burst. Each event is delivered **once**: lossy `events` copies of
+    /// guaranteed-channel events are consumed but not re-forwarded, and identical
+    /// `.registrationState` renewals collapse to one observation per transition
     /// (``relayRegistration``).
     ///
     /// `@MainActor` by type, like ``RegistrationObserver`` — update UI directly.
     public typealias EventObserver = @MainActor @Sendable (PJSUAEvent) -> Void
     private var eventObserver: EventObserver?
 
-    /// Last registration tuple relayed to the observers, per account. Terminal reports are
-    /// emitted on **both** channels (see `emitCall`), so the same event can arrive twice;
-    /// renewals also repeat an identical tuple every expiry interval. Relay only on change —
-    /// each observer sees each state transition exactly once.
+    /// Last registration tuple relayed to the observers, per account. Renewals repeat an
+    /// identical tuple every expiry interval — relay only on change. Cleared when an
+    /// inactive report relays (the epoch ended), so a recycled `AccountID` cannot inherit
+    /// the previous account's deduplication state.
     private struct RegistrationSnapshot: Equatable {
         let active: Bool
         let statusCode: Int32
@@ -325,8 +326,8 @@ public actor CallSessionRouter {
     /// the streams themselves can't be injected without a running engine.
     func handle(_ event: PJSUAEvent) async {
         // Observe before acting: the tap sees the event regardless of what CallKit does
-        // with it. `.registrationState` is excluded here — it goes through the deduplicated
-        // ``relayRegistration`` path (it may arrive on this channel AND the telemetry one).
+        // with it. `.registrationState` is excluded here — it reaches the tap through the
+        // transition-deduplicated ``relayRegistration`` path instead.
         if case .registrationState = event { } else {
             await eventObserver?(event)
         }
@@ -367,34 +368,29 @@ public actor CallSessionRouter {
         }
     }
 
-    /// The bounded `events` stream carries the telemetry cases — `.registrationState`
-    /// is relayed to the app's observers through the deduplicated path; `.callMediaEvent`
-    /// has no CallKit mapping but is forwarded to the event tap; the call-scoped copies
-    /// arriving here are lossy duplicates already handled (and forwarded) on `callEvents`,
-    /// so they are ignored rather than re-acted on.
+    /// The bounded `events` stream is lossy copies only: every case that also lands on
+    /// `callEvents` (call-scoped events, **all** registration reports, one-shot media
+    /// errors) has its authoritative delivery there, so nothing here is re-acted on or
+    /// re-forwarded. The one telemetry-exclusive payload is `.callMediaEvent(.other)` —
+    /// periodic, informational, and safe to lose under burst.
     /// Internal (not `private`) for the same @testable reason as ``handle(_:)``.
     func handleTelemetry(_ event: PJSUAEvent) async {
-        switch event {
-        case let .registrationState(account, active, statusCode, expiration):
-            await relayRegistration(account: account, active: active,
-                                    statusCode: statusCode, expiration: expiration)
-        case .callMediaEvent:
+        if case .callMediaEvent(_, _, .other) = event {
             await eventObserver?(event)
-        default:
-            break
         }
     }
 
     /// Relay one registration report to ``registrationObserver`` and ``eventObserver``,
-    /// but only when it carries a *changed* tuple. Terminal reports are dual-emitted
-    /// (guaranteed channel + lossy copy), so both consumer loops can deliver the same
-    /// event — the per-account snapshot collapses that to one observation per transition.
+    /// but only when it carries a *changed* tuple — renewals repeat an identical report
+    /// every expiry interval and only transitions are worth observing. An inactive report
+    /// additionally **clears** the snapshot: it ends the registration epoch, so a reused
+    /// `AccountID` cannot inherit the previous account's deduplication state.
     private func relayRegistration(account: AccountID, active: Bool,
                                    statusCode: Int32, expiration: UInt32) async {
         let snapshot = RegistrationSnapshot(active: active, statusCode: statusCode,
                                             expiration: expiration)
         guard lastRegistrationRelay[account] != snapshot else { return }
-        lastRegistrationRelay[account] = snapshot
+        lastRegistrationRelay[account] = active ? snapshot : nil
         await registrationObserver?(account, active, statusCode, expiration)
         await eventObserver?(.registrationState(account: account, active: active,
                                                 statusCode: statusCode, expiration: expiration))

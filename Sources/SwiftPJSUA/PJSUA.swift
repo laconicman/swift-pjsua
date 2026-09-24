@@ -26,14 +26,16 @@ public actor PJSUA {
     /// The complete event record from PJSUA, as a cancellable async sequence. Bounded
     /// newest-first (64): under burst or with no consumer, newest telemetry wins — a
     /// deliberate contract, since everything exclusive to this channel is periodic or
-    /// informational. For the call-scoped events whose loss is unrecoverable, see
+    /// informational. For the events whose loss is unrecoverable, see
     /// ``callEvents`` (TD-3).
     public nonisolated let events: AsyncStream<PJSUAEvent>
 
-    /// Guaranteed-delivery channel for the call-scoped subset — `.incomingCall`,
-    /// `.callState`, `.callMediaState`, `.streamDestroyed` — each also delivered to
-    /// ``events``. Unbounded by design: these are per-call, so an unconsumed buffer
-    /// grows only with real call activity and an idle engine produces none.
+    /// Guaranteed-delivery channel for the unrecoverable subset — `.incomingCall`,
+    /// `.callState`, `.callMediaState`, `.streamDestroyed`, every `.registrationState`
+    /// (one ordered authoritative path for account state), and one-shot media errors —
+    /// each also delivered to ``events``. Unbounded by design: per-call events grow only
+    /// with call activity, and registration renewals are ~1/expiry-interval per account,
+    /// so an idle engine produces nothing.
     public nonisolated let callEvents: AsyncStream<PJSUAEvent>
 
     enum State { case idle, running, stopped }

@@ -251,11 +251,20 @@ private func pjsuaOnCallMediaEvent(_ callId: pjsua_call_id,
                                    _ event: UnsafeMutablePointer<pjmedia_event>?) {
     assertOnRegisteredPJThread()
     guard let event else { return }
-    emit(.callMediaEvent(
-        call: CallID(callId),
-        mediaIndex: Int(mediaIndex),
-        event: CallMediaEvent(event.pointee)
-    ))
+    let mediaEvent = CallMediaEvent(event.pointee)
+    let wrapped = PJSUAEvent.callMediaEvent(call: CallID(callId),
+                                          mediaIndex: Int(mediaIndex),
+                                          event: mediaEvent)
+    switch mediaEvent {
+    case .mediaTransportError, .audioDeviceError:
+        // One-shot failures pjsua itself never reacts to — dropped from the bounded stream,
+        // the app would never learn media died while the call stays confirmed.
+        emitCall(wrapped)
+    case .other:
+        // Periodic/informational (RTCP, format changes, keyframe requests…) — a dropped
+        // copy is made whole by the next event, so these stay on the bounded stream.
+        emit(wrapped)
+    }
 }
 
 private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointer<pjsua_reg_info>?) {
@@ -278,15 +287,16 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     // "Active" = a renewing registration that the server accepted (2xx) with a live
     // expiration. A successful un-REGISTER (renewing == false, expiration == 0) is inactive.
     let active = renewing && (Int32(PJSIP_SC_OK.rawValue) ..< 300).contains(statusCode) && expiration > 0
-    // Terminal reports (auth failure, un-REGISTER) are one-shot: dropped from the bounded
-    // stream they would leave a stale "registered" standing with no renewal to correct it,
-    // so they go on the guaranteed channel. Active renewals stay on `events` — the next
-    // renewal always replaces a dropped copy.
-    let event = PJSUAEvent.registrationState(
+    // Every registration report goes on the guaranteed channel: it is the single ordered,
+    // authoritative path for account state — terminals because they are one-shot, renewals
+    // because splitting the sequence across two independently-drained streams would let a
+    // consumer observe them out of order. Renewals are ~1/expiry-interval per account, far
+    // below call volume, so the unbounded stream stays cheap. (`emitCall` still writes the
+    // lossy `events` twin for record completeness; the router ignores it.)
+    emitCall(.registrationState(
         account: AccountID(accId),
         active: active,
         statusCode: statusCode,
         expiration: expiration
-    )
-    if active { emit(event) } else { emitCall(event) }
+    ))
 }

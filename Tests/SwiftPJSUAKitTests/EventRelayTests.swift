@@ -22,7 +22,11 @@ final class EventRelayTests: XCTestCase {
     @MainActor
     private final class Collector: @unchecked Sendable {
         private(set) var events: [PJSUAEvent] = []
+        private(set) var registrations: [(active: Bool, code: Int32)] = []
         func observe(_ event: PJSUAEvent) { events.append(event) }
+        func observeRegistration(active: Bool, code: Int32) {
+            registrations.append((active, code))
+        }
     }
 
     private func streamDestroyedEvent(call: CallID) -> PJSUAEvent {
@@ -53,9 +57,9 @@ final class EventRelayTests: XCTestCase {
         }
     }
 
-    /// `.callMediaEvent` travels on the bounded telemetry stream only — the tap forwards it
-    /// from the telemetry loop.
-    func testMediaEventReachesEventObserverViaTelemetry() async {
+    /// Informational `.callMediaEvent(.other)` travels on the bounded telemetry stream only —
+    /// the tap forwards it from the telemetry loop.
+    func testInformationalMediaEventReachesEventObserverViaTelemetry() async {
         let router = makeRouter()
         let collector = await Collector()
         await router.setEventObserver { event in collector.observe(event) }
@@ -70,8 +74,28 @@ final class EventRelayTests: XCTestCase {
         }
     }
 
-    /// Terminal `.registrationState` reports are dual-emitted (guaranteed + lossy copy), so
-    /// both router loops see the same event — the dedup must collapse them to one observation.
+    /// One-shot media errors are emitted on the guaranteed channel; their lossy telemetry
+    /// twin must not re-forward, or the tap double-delivers.
+    func testMediaErrorForwardsFromGuaranteedChannelOnly() async {
+        let router = makeRouter()
+        let collector = await Collector()
+        await router.setEventObserver { event in collector.observe(event) }
+
+        let error = PJSUAEvent.callMediaEvent(call: CallID(0), mediaIndex: 0,
+                                              event: .mediaTransportError(status: 70014,
+                                                                          isRTP: true))
+        await router.handle(error)          // guaranteed copy — delivers
+        await router.handleTelemetry(error) // lossy twin — ignored
+
+        let observed = await collector.events
+        XCTAssertEqual(observed.count, 1,
+                       "a media transport error must reach the tap exactly once")
+    }
+
+    /// Every registration report travels the guaranteed channel — the single ordered,
+    /// authoritative path — so the telemetry twin is ignored rather than deduplicated.
+    /// Order can't be tested by driving both handlers (that would still look ordered);
+    /// what can be pinned is that only one channel ever relays.
     func testTerminalRegistrationRelayedOnceAcrossBothChannels() async {
         let router = makeRouter()
         let collector = await Collector()
@@ -80,12 +104,31 @@ final class EventRelayTests: XCTestCase {
         let account = AccountID(0)
         let terminal = PJSUAEvent.registrationState(account: account, active: false,
                                                   statusCode: 403, expiration: 0)
-        await router.handle(terminal)          // guaranteed-channel copy
-        await router.handleTelemetry(terminal) // lossy copy — must not double-deliver
+        await router.handle(terminal)          // authoritative copy — delivers
+        await router.handleTelemetry(terminal) // lossy twin — ignored entirely
 
         let observed = await collector.events
         XCTAssertEqual(observed.count, 1,
                        "the same terminal report on both channels must deliver once")
+    }
+
+    /// Telemetry-channel registration reports are lossy twins of guaranteed-channel
+    /// emissions — the router never relays them (single ordered authoritative path).
+    func testTelemetryRegistrationCopiesAreNeverRelayed() async {
+        let router = makeRouter()
+        let collector = await Collector()
+        await router.setRegistrationObserver { _, active, code, _ in
+            collector.observeRegistration(active: active, code: code)
+        }
+        await router.setEventObserver { event in collector.observe(event) }
+
+        await router.handleTelemetry(.registrationState(account: AccountID(0), active: true,
+                                                        statusCode: 200, expiration: 300))
+
+        let observed = await collector.events
+        let regCount = await collector.registrations.count
+        XCTAssertTrue(observed.isEmpty)
+        XCTAssertEqual(regCount, 0)
     }
 
     /// Periodic renewals repeat an identical tuple every expiry interval; only *changes*
@@ -96,16 +139,39 @@ final class EventRelayTests: XCTestCase {
         await router.setEventObserver { event in collector.observe(event) }
 
         let account = AccountID(0)
-        await router.handleTelemetry(.registrationState(account: account, active: true,
-                                                        statusCode: 200, expiration: 300))
-        await router.handleTelemetry(.registrationState(account: account, active: true,
-                                                        statusCode: 200, expiration: 300))
-        await router.handleTelemetry(.registrationState(account: account, active: true,
-                                                        statusCode: 200, expiration: 60))
+        await router.handle(.registrationState(account: account, active: true,
+                                               statusCode: 200, expiration: 300))
+        await router.handle(.registrationState(account: account, active: true,
+                                               statusCode: 200, expiration: 300))
+        await router.handle(.registrationState(account: account, active: true,
+                                               statusCode: 200, expiration: 60))
 
         let observed = await collector.events
         XCTAssertEqual(observed.count, 2,
                        "identical renewal is a duplicate; a changed expiration is new state")
+    }
+
+    /// PJSUA recycles account IDs on re-add. A terminal report ends the epoch and clears
+    /// the dedup snapshot, so a reused ID's first report — even an identical tuple — still
+    /// reaches the observers.
+    func testReusedAccountIDAfterTerminalStillRelays() async {
+        let router = makeRouter()
+        let collector = await Collector()
+        await router.setRegistrationObserver { _, active, code, _ in
+            collector.observeRegistration(active: active, code: code)
+        }
+
+        let account = AccountID(0)
+        // First account lifecycle ends on a terminal report...
+        await router.handle(.registrationState(account: account, active: false,
+                                               statusCode: 403, expiration: 0))
+        // ...the ID is recycled, and the new account's first report is identical.
+        await router.handle(.registrationState(account: account, active: false,
+                                               statusCode: 403, expiration: 0))
+
+        let relayed = await collector.registrations
+        XCTAssertEqual(relayed.count, 2,
+                       "a terminal ends the epoch — an identical later report is new state")
     }
 
     /// Call-scoped copies arrive on the telemetry stream too (emitCall writes both) — the

@@ -331,7 +331,7 @@ hop clears the sticky rejection instead of retrying into another 439.
   remaining half — pushing the Contact to the regc when outbound turns out unsupported — is still
   on the fork as [laconicman#7](https://github.com/laconicman/pjproject/pull/7).
 
-## TD-22 — TLS now fails fast at start, and our only recovery path is TD-19 · open (blocks TLS)
+## TD-29 — TLS now fails fast at start, and our only recovery path is TD-19 · open (blocks TLS)
 Found while fixing the Apple TLS backends upstream, Aug 2026.
 
 pjproject [#5216](https://github.com/pjsip/pjproject/pull/5216) (merged) makes a TLS listener
@@ -342,24 +342,25 @@ brought the Darwin backend into line and settled the question upstream.
 - **What it buys us:** an unloadable certificate now fails `pjsua_transport_create()` directly,
   instead of producing a listener that reports ready and then rejects every handshake. The error
   arrives where it can be acted on.
-- **What it costs us:** there is no longer any implicit recovery. A certificate that only becomes
-  loadable *after* startup — a keychain unlocked late, a provisioning write, a rotated file —
-  requires an explicit `pjsip_tls_transport_restart()` / `pjsua_transport_lis_restart()`. That is
-  the contract we argued for upstream, on the grounds that it is the house convention
-  (`restart_listener()` in `pjsua_core.c` already reschedules itself on failure).
+- **What it costs us:** there is no longer any implicit recovery, and the retry depends on *which*
+  failure happened. If `pjsua_transport_create()` failed, there is no listener to restart — the
+  retry is another `pjsua_transport_create()`. Only an *existing* listener takes
+  `pjsip_tls_transport_restart()` / `pjsua_transport_lis_restart()` — e.g. to pick up a rotated
+  certificate. That split is the contract we argued for upstream, on the grounds that it is the
+  house convention (`restart_listener()` in `pjsua_core.c` already reschedules itself on failure).
 - **Why that is a problem here:** **that call is TD-19.** `pjsua_transport_lis_restart()` is
   modify-style and consumes a `pjsua_transport_config` whose defaults zero every TLS credential
   field. So the one recovery path the upstream design assumes is the one we have already recorded
   as silently dropping our credentials.
 - **Consequence:** TD-19 stops being latent the moment we ship TLS. Whoever adds a TLS transport
-  must carry the live `tls_setting` across a restart *before* relying on restart as recovery,
-  otherwise a transient certificate problem becomes a permanent one — the listener fails at start,
-  the retry restarts it without credentials, and mutual TLS is quietly off.
+  must carry the live `tls_setting` across any restart *before* relying on restart as recovery —
+  an existing listener restarted with zeroed credentials (rotation, IP change) silently drops
+  mutual TLS, and a listener that failed to start must be re-*created*, not restarted.
 - The same restart is also the only way to pick up a **rotated** certificate: the Apple backend
   captures the identity in the listener's `nw_parameters` at start and never reloads it.
 
 Three further constraints from the same investigation, all recorded in
-[`swift-pjsip/docs/Apple-TLS-Backends.md`](../../swift-pjsip/docs/Apple-TLS-Backends.md):
+[`swift-pjsip/docs/Apple-TLS-Backends.md`](https://github.com/laconicman/swift-pjsip/blob/main/docs/Apple-TLS-Backends.md):
 
 - `PJ_SSL_SOCK_IMP_APPLE` **requires the select ioqueue**. Every async event arrives via
   `ssl_network_event_poll()`, whose only caller is `ioqueue_select.c`; with kqueue the build links
@@ -370,7 +371,8 @@ Three further constraints from the same investigation, all recorded in
   paths, one reached by SAN-only leaves that modern issuers emit routinely. Fixes are in review
   upstream; until they land, peer certificates are input the library does not fully validate.
 
-- Refs: TD-19; pjproject #5216, #5222, #5224; `swift-pjsip/docs/Apple-TLS-Backends.md`.
+- Refs: TD-19; pjproject #5216, #5222, #5224;
+  [swift-pjsip `docs/Apple-TLS-Backends.md`](https://github.com/laconicman/swift-pjsip/blob/main/docs/Apple-TLS-Backends.md).
 
 ## TD-21 — `disable_reg_on_modify` is not a safe "apply config quietly" switch · obligation
 Verified 2026-08-04, **history established 2026-08-17**. The flag suppresses the un-REGISTER and

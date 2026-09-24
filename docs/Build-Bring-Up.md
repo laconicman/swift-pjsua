@@ -1,10 +1,15 @@
 # Build bring-up & first-run verification
 
-`Production-Roadmap.md` §5 records the load-bearing caveat: this package was **written
-against `swift-pjsip`'s API but never linked** — no PJSIP module or iOS SDK was present in
-the authoring environment — and there is no CI (`Tech-Debt.md` TD-12). The design is frozen;
-its *compilation* is not yet proven. This doc is the checklist to take it from "reads
-correctly" to "builds and rings," and the order to expect friction in.
+This doc was written when the package had been **authored against `swift-pjsip`'s API but
+never linked** — no PJSIP module or iOS SDK in the authoring environment — as the checklist
+to take it from "reads correctly" to "builds and rings," and the order to expect friction in.
+
+**That gate is passed.** The package compiles and links for the iOS Simulator, its own test
+suites run there, and the `offhook` live suite registers, places loopback calls and carries
+RTP through it. What has *not* been proven is a run on a **device**, and there is still no CI
+(`Tech-Debt.md` TD-12) — so nothing here re-checks itself. The friction table below is kept as
+the triage order for the next environment that meets the compiler for the first time (a device,
+a macOS slice, a PJSIP bump), not as a list of open items.
 
 ## Why `swift test` is not the gate
 
@@ -18,6 +23,26 @@ xcodebuild build -scheme <App> -destination 'platform=iOS Simulator,name=iPhone 
 
 The app target depends on `SwiftPJSUA` (+ `SwiftPJSUAKit`); the framework link flags ride in
 on `SwiftPJSUA`'s `linkerSettings` automatically (the support-target pattern, roadmap §3.5).
+
+An app target is needed for the *runtime smoke* below, but **not** for the test suites: the
+package's own generated scheme builds and runs them against the Simulator directly, which is how
+`SwiftPJSUATests` is run today.
+
+```
+xcodebuild test -scheme swift-pjsua-Package \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+```
+
+Add `-only-testing:SwiftPJSUATests/TLSTransportTests` to run one suite. Confirmed working on
+Xcode 26.6 with an iOS 26.5 simulator — 8 tests, no build warnings. This is a smaller gate than
+TD-12 asks for, but it is a real one and it needs no app.
+
+**Simulator only, and not by choice.** Apple does not allow tool-hosted testing on device
+destinations, and a SwiftPM package test target cannot declare a host application — the setting
+does not exist in the manifest API — so these tests are tool-hosted by construction. Running any
+XCTest of this stack on a device needs a project with a host app, which is blocked on TD-28.
+The device route today is `offhook`'s app-side auto-smoke:
+[`offhook/docs/Testing-Playbook.md`](../../offhook/docs/Testing-Playbook.md).
 
 ## Predicted first-compile friction (triage in this order)
 

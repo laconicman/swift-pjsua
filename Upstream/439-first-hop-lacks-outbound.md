@@ -23,7 +23,7 @@ Originally verified 2026-08-04 against local master `4896a5e6a`; issue body kept
 describes the **pre-fix** state and is retained as the record of why the change was made.
 
 **Still open from this line of work:** fork PR
-[laconicman/pjproject#7](https://github.com/laconicman/pjproject/pull/7) — *"push the Contact to the
+[laconicman/pjproject#15](https://github.com/laconicman/pjproject/pull/15) — *"push the Contact to the
 regc when outbound turns out unsupported"* — the remaining half, not yet sent upstream.
 
 Unlike the other notes in this folder this is not a "fresh default into a modify-style API"

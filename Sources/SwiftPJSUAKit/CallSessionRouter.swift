@@ -87,6 +87,10 @@ public actor CallSessionRouter {
     private var pendingObserverDeliveries = 0
     /// Backlog depth at which droppable deliveries are skipped. Sized with the telemetry
     /// stream in mind — deeper than this means the observer is wedged, not busy.
+    /// Guaranteed-channel events deliberately bypass the cap: they are activity-bounded
+    /// (O(calls × states), not per-frame), and dropping them would silently corrupt the
+    /// tap's every-transition contract — a permanently wedged observer is an app bug the
+    /// tap cannot heal either way.
     private static let maxPendingObserverDeliveries = 32
 
     /// Enqueue a `@MainActor` observer delivery without awaiting it. `droppingIfBusy`

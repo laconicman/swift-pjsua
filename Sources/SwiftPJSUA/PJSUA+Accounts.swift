@@ -47,7 +47,13 @@ extension PJSUA {
                             secret: String,
                             credentials: CredentialStore) throws -> AccountID {
         // The pjsua account table is a fixed array sized PJSUA_MAX_ACC at binary build time
-        // (4 in the shipped PJ_CONFIG_IPHONE build). Overflowing it is **a crash or an error
+        // (8 as of swift-pjsip 0.2.1, which takes upstream's own default). Reading the
+        // imported constant is the right thing to guard on: it is the same value this
+        // compilation laid the pjsua struct layouts out with. Those two can come apart —
+        // 0.2.0's module map dropped config_site.h's overrides, so Swift compiled 4 against a
+        // binary built with 8 — which is why that release was withdrawn and why
+        // verify-xcframework.sh now asserts the module and the headers agree.
+        // Overflowing the table is **a crash or an error
         // return depending on the PJSIP version**: through 2.17 `pjsua_acc_add` guards it with
         // PJ_ASSERT_RETURN, which aborts debug builds; upstream now returns PJ_ETOOMANY in every
         // build (our fix, pjsip/pjproject#5070, `54ebfdbec`). We pre-check regardless — keeps older

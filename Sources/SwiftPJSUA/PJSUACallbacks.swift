@@ -52,6 +52,25 @@ import PJSIP
 private nonisolated(unsafe) var pjsuaEventSink: AsyncStream<PJSUAEvent>.Continuation?
 private nonisolated(unsafe) var pjsuaCallEventSink: AsyncStream<PJSUAEvent>.Continuation?
 
+/// Process-global sink for pjsip's own log lines (`pjsua_logging_config.cb`). Same
+/// `nonisolated(unsafe)` invariant as the event sinks, with a narrower window: written once
+/// in `PJSUA.start(_:)` before `pjsua_init` can produce a line, cleared in `shutdown` after
+/// `pjsua_destroy` has stopped the threads that would call it. Called from arbitrary pjsip
+/// threads at console volume — the callback does as little as possible before yielding to
+/// the sink.
+nonisolated(unsafe) var pjsuaLogSink: (@Sendable (Int32, String) -> Void)?
+
+/// `pjsua_logging_config.cb` — level-gated by `logging_config.level`, fired on whichever
+/// pjsip thread emitted the line. `data` is NOT NUL-terminated; `len` is authoritative.
+/// The closure above is non-capturing, so it converts to `@convention(c)` automatically.
+func pjsuaOnLog(_ level: Int32, _ data: UnsafePointer<CChar>?, _ len: Int32) {
+    guard let sink = pjsuaLogSink, let data, len > 0 else { return }
+    let text = String(decoding: UnsafeRawBufferPointer(start: UnsafeRawPointer(data),
+                                                       count: Int(len)),
+                      as: UTF8.self)
+    sink(level, text)
+}
+
 /// Create the two event streams and install their continuations as the process-global
 /// sinks. Called once from `PJSUA.init` before anything can start delivering callbacks.
 ///

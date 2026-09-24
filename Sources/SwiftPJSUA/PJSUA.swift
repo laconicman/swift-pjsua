@@ -67,8 +67,34 @@ public actor PJSUA {
         /// pjsip/pjproject#5075).
         public var transports: [TransportConfiguration] = [.init("udp", .udp), .init("tcp", .tcp)]
         public var logLevel: UInt32 = 4
+        /// Verbosity ceiling for ``logSink`` — pjsip's `logging_config.level`, independent of
+        /// ``logLevel`` (which gates console output). pjsip's own default is 5.
+        public var logSinkLevel: UInt32 = 5
+        /// Whether pjsip logs whole SIP messages (`logging_config.msg_logging`, on by default
+        /// upstream). This is what makes a "live SIP log" possible — leave on for a debug
+        /// client, turn off if the traffic itself must not reach the sink.
+        public var messageLogging: Bool = true
+        /// When set, receives each pjsip log line up to ``logSinkLevel`` — called from
+        /// arbitrary pjsip worker threads, so it must be fast and must not block. The console
+        /// still logs at ``logLevel`` regardless; this is a tap, not a redirect.
+        /// Runtime-only: excluded from `Codable` and `==` — closures are neither.
+        public var logSink: (@Sendable (_ level: Int32, _ text: String) -> Void)?
         public var userAgent: String = "swift-pjsua"
         public init() {}
+
+        private enum CodingKeys: String, CodingKey {
+            case transports, logLevel, logSinkLevel, messageLogging, userAgent
+        }
+
+        /// `logSink` itself has no equality to compare, so `==` counts only set-vs-nil:
+        /// a config that taps the log is a different configuration from one that does not.
+        public static func == (l: Configuration, r: Configuration) -> Bool {
+            l.transports == r.transports && l.logLevel == r.logLevel
+                && l.logSinkLevel == r.logSinkLevel
+                && l.messageLogging == r.messageLogging
+                && l.userAgent == r.userAgent
+                && (l.logSink == nil) == (r.logSink == nil)
+        }
 
         /// Hand-written for the same reason as ``AccountConfiguration``: the synthesised
         /// `init(from:)` ignores property defaults, so **every** key would be mandatory and a
@@ -80,6 +106,9 @@ public actor PJSUA {
                                                        forKey: .transports)
                 ?? [.init("udp", .udp), .init("tcp", .tcp)]
             logLevel = try container.decodeIfPresent(UInt32.self, forKey: .logLevel) ?? 4
+            logSinkLevel = try container.decodeIfPresent(UInt32.self, forKey: .logSinkLevel) ?? 5
+            messageLogging = try container.decodeIfPresent(Bool.self, forKey: .messageLogging)
+                ?? true
             userAgent = try container.decodeIfPresent(String.self, forKey: .userAgent)
                 ?? "swift-pjsua"
         }
@@ -151,6 +180,13 @@ public actor PJSUA {
         var log = pjsua_logging_config()
         pjsua_logging_config_default(&log)
         log.console_level = config.logLevel
+        log.msg_logging = pj_bool_t(config.messageLogging)
+        // The sink's verbosity gate is `level`, not `console_level` — independent taps.
+        log.level = config.logSinkLevel
+        if config.logSink != nil {
+            pjsuaLogSink = config.logSink
+            log.cb = { level, data, len in pjsuaOnLog(level, data, len) }
+        }
 
         var media = pjsua_media_config()
         pjsua_media_config_default(&media)
@@ -193,6 +229,7 @@ public actor PJSUA {
         // pjsua_destroy() invalidated every transport id; drop the stale name -> id map so a
         // later start() cannot resolve a transportName to a dead transport.
         transportIDs.removeAll()
+        pjsuaLogSink = nil // worker threads are gone — safe to clear the process-global tap
         accountParameters.removeAll()
         finishPJSUAEventStreams()
         executor.stop()

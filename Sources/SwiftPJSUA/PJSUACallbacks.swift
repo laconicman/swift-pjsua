@@ -44,26 +44,60 @@ import PJSIP
 //
 // Full findings: docs/Threading-Validation.md.
 //
-// `nonisolated(unsafe)` invariant: written exactly once via ``makePJSUAEventStream()`` in
+// `nonisolated(unsafe)` invariant: written exactly once via ``makePJSUAEventStreams()`` in
 // `PJSUA.init`, before `pjsua_start()` can fire any callback; read-only thereafter.
 // `AsyncStream.Continuation` is `Sendable` and its `yield` is thread-safe, so yielding
 // from PJSUA's worker-thread callbacks is safe. Removal plan: when pjsua gains per-instance
 // user-data on these callbacks, replace the global with that.
 private nonisolated(unsafe) var pjsuaEventSink: AsyncStream<PJSUAEvent>.Continuation?
+private nonisolated(unsafe) var pjsuaCallEventSink: AsyncStream<PJSUAEvent>.Continuation?
 
-/// Create the event stream and install its continuation as the process-global sink.
-/// Called once from `PJSUA.init` before anything can start delivering callbacks.
-func makePJSUAEventStream() -> AsyncStream<PJSUAEvent> {
-    let (stream, continuation) = AsyncStream<PJSUAEvent>.makeStream(
-        bufferingPolicy: .bufferingNewest(64)
-    )
-    pjsuaEventSink = continuation
-    return stream
+/// Create the two event streams and install their continuations as the process-global
+/// sinks. Called once from `PJSUA.init` before anything can start delivering callbacks.
+///
+/// Two channels, two contracts (TD-3):
+/// - `events` is the complete record, bounded newest-first: every event lands here and
+///   telemetry may drop under pressure — it carries only periodic (`.registrationState`,
+///   re-delivered each renewal) or informational (`.callMediaEvent`) payloads besides
+///   the lossy copies of the call channel, so a drop converges instead of stranding.
+/// - `callEvents` is the guaranteed channel for the call-scoped events whose loss is
+///   unrecoverable — `.incomingCall` (call never rings), `.callState` (a dropped
+///   `.disconnected` strands a CallKit call), `.callMediaState` (a pending hold never
+///   fulfills), `.streamDestroyed` (the only copy of the final statistics). It is
+///   unbounded, which is affordable precisely here: these events are per-call, so an
+///   unconsumed buffer grows only with real call activity — an idle engine produces
+///   none, unlike the periodic renewals a single unbounded stream would have retained.
+func makePJSUAEventStreams() -> (events: AsyncStream<PJSUAEvent>,
+                                callEvents: AsyncStream<PJSUAEvent>) {
+    let (events, eventsContinuation) = AsyncStream<PJSUAEvent>.makeStream(
+        bufferingPolicy: .bufferingNewest(64))
+    let (callEvents, callContinuation) = AsyncStream<PJSUAEvent>.makeStream()
+    pjsuaEventSink = eventsContinuation
+    pjsuaCallEventSink = callContinuation
+    return (events, callEvents)
 }
 
-/// Finish the event stream (called from `PJSUA.shutdown`).
-func finishPJSUAEventStream() {
+/// Finish the event streams (called from `PJSUA.shutdown`). Also resets the registration
+/// dedup state — a restarted engine's account slots are fresh, so stale tuples must not
+/// suppress the first reports of a new engine lifetime.
+func finishPJSUAEventStreams() {
     pjsuaEventSink?.finish()
+    pjsuaCallEventSink?.finish()
+    regDedupLock.lock()
+    lastEmittedRegState.removeAll()
+    regDedupLock.unlock()
+}
+
+/// Telemetry yield: the bounded `events` stream only.
+private func emit(_ event: PJSUAEvent) {
+    pjsuaEventSink?.yield(event)
+}
+
+/// Call-scoped yield: the guaranteed `callEvents` channel plus the `events` copy, so
+/// the complete record stays complete for consumers that want it.
+private func emitCall(_ event: PJSUAEvent) {
+    pjsuaCallEventSink?.yield(event)
+    pjsuaEventSink?.yield(event)
 }
 
 /// Wire the file-private C callbacks into a `pjsua_config`. The closures are
@@ -74,6 +108,8 @@ func installPJSUACallbacks(into cfg: inout pjsua_config) {
     cfg.cb.on_incoming_call    = { acc, callId, rx in pjsuaOnIncomingCall(acc, callId, rx) }
     cfg.cb.on_call_media_state = { callId        in pjsuaOnCallMediaState(callId) }
     cfg.cb.on_reg_state2       = { acc, info     in pjsuaOnRegState2(acc, info) }
+    cfg.cb.on_stream_destroyed = { callId, strm, idx in pjsuaOnStreamDestroyed(callId, strm, idx) }
+    cfg.cb.on_call_media_event = { callId, medIdx, ev in pjsuaOnCallMediaEvent(callId, medIdx, ev) }
 }
 
 /// Debug sanity check: every callback must arrive on a thread PJLIB has registered.
@@ -94,7 +130,7 @@ private func pjsuaOnCallState(_ callId: pjsua_call_id, _ event: UnsafeMutablePoi
     assertOnRegisteredPJThread()
     var info = pjsua_call_info()
     guard pjsua_call_get_info(callId, &info).isSuccess else { return }
-    pjsuaEventSink?.yield(.callState(
+    emitCall(.callState(
         call: CallID(callId),
         state: CallState(info.state),
         sipCallID: info.call_id.string,
@@ -115,7 +151,7 @@ private func pjsuaOnIncomingCall(_ accId: pjsua_acc_id,
     let from = haveInfo ? info.remote_info.string : nil
     // rem_vid_cnt > 0 when the remote offered ≥1 video stream → drives CXCallUpdate.hasVideo.
     let offeredVideo = haveInfo && info.rem_vid_cnt > 0
-    pjsuaEventSink?.yield(.incomingCall(
+    emitCall(.incomingCall(
         account: AccountID(accId),
         call: CallID(callId),
         sipCallID: sipCallID,
@@ -152,7 +188,7 @@ private func pjsuaOnCallMediaState(_ callId: pjsua_call_id) {
     }
     // Surface the full per-stream vector; the engine does not filter — the app/router
     // decides which streams/states matter (see `PJSUAEvent.callMediaState`).
-    pjsuaEventSink?.yield(.callMediaState(call: CallID(callId), media: media))
+    emitCall(.callMediaState(call: CallID(callId), media: media))
 }
 
 /// Build the per-stream media vector from a call's `media[]` C array (a fixed-size tuple in
@@ -168,10 +204,94 @@ private func callMediaInfos(from info: inout pjsua_call_info) -> [CallMediaInfo]
     }
 }
 
+/// The stream is about to be destroyed — this is the **only** point at which its final counters
+/// are readable, so they are read here rather than surfaced as a pointer the app could not
+/// safely use. `pjsua_aud_stop_stream()` invokes this while the stream is still fully
+/// constructed (`pjmedia_stream_destroy` runs afterwards) and with **`PJSUA_LOCK` held**, so the
+/// G2 rule matters more here than anywhere else: read POD, yield, return.
+///
+/// Not called for locally-hung-up calls whose teardown has already set `call->hanging_up`. That
+/// it *is* called for `pjsua_call_hangup()` depends on undocumented ordering in `pjsua_call.c` —
+/// the media deinit precedes the flag by three lines. `offhook` pins that with a regression test;
+/// see `docs/Call-Termination-Paths.md` §2.
+private func pjsuaOnStreamDestroyed(_ callId: pjsua_call_id,
+                                    _ stream: OpaquePointer?,
+                                    _ streamIndex: UInt32) {
+    assertOnRegisteredPJThread()
+    guard let stream else { return }
+    var stat = pjmedia_rtcp_stat()
+    guard pjmedia_stream_get_stat(stream, &stat).isSuccess else { return }
+
+    // Codec info is a separate read and a nice-to-have: a stream with no readable info still has
+    // counters worth keeping, so a failure here degrades to an unnamed codec rather than dropping
+    // the record.
+    var info = pjmedia_stream_info()
+    let codec: CallStreamStatistics.Codec
+    if pjmedia_stream_get_info(stream, &info).isSuccess {
+        codec = .init(name: info.fmt.encoding_name.string ?? "?",
+                      clockRate: info.fmt.clock_rate,
+                      channels: info.fmt.channel_cnt,
+                      payloadType: info.fmt.pt)
+    } else {
+        codec = .init(name: "?", clockRate: 0, channels: 0, payloadType: 0)
+    }
+
+    emitCall(.streamDestroyed(
+        call: CallID(callId),
+        mediaIndex: Int(streamIndex),
+        statistics: CallStreamStatistics(kind: .audio,
+                                         codec: codec,
+                                         transmit: .init(stat.tx),
+                                         receive: .init(stat.rx),
+                                         roundTrip: .init(usec: stat.rtt))
+    ))
+}
+
+/// A `pjmedia_event` pjsua chose not to act on. Delivered on the **timer thread** — pjsua defers
+/// it through a 1 ms `pjsua_schedule_timer2` rather than delivering it on the media thread that
+/// published it — so this is the one callback in this file that does not share the others'
+/// threading context. See `docs/Threading-Validation.md`.
+private func pjsuaOnCallMediaEvent(_ callId: pjsua_call_id,
+                                   _ mediaIndex: UInt32,
+                                   _ event: UnsafeMutablePointer<pjmedia_event>?) {
+    assertOnRegisteredPJThread()
+    guard let event else { return }
+    let mediaEvent = CallMediaEvent(event.pointee)
+    let wrapped = PJSUAEvent.callMediaEvent(call: CallID(callId),
+                                          mediaIndex: Int(mediaIndex),
+                                          event: mediaEvent)
+    switch mediaEvent {
+    case .mediaTransportError, .audioDeviceError:
+        // One-shot failures pjsua itself never reacts to — dropped from the bounded stream,
+        // the app would never learn media died while the call stays confirmed.
+        emitCall(wrapped)
+    case .other:
+        // Periodic/informational (RTCP, format changes, keyframe requests…) — a dropped
+        // copy is made whole by the next event, so these stay on the bounded stream.
+        emit(wrapped)
+    }
+}
+
+/// Last registration tuple emitted per account slot. Renewals repeat an identical report
+/// every expiry interval; only *transitions* go on the unbounded `callEvents` channel, so
+/// an idle-but-registered engine buffers nothing there (the raw heartbeat still reaches the
+/// bounded `events` stream for the record). Cleared on a terminal report: the epoch ended,
+/// and a recycled `pjsua_acc_id` must not inherit the previous account's dedup state.
+/// Guarded by `regDedupLock` — reg callbacks may arrive on different PJSUA worker threads.
+private let regDedupLock = NSLock()
+private var lastEmittedRegState: [pjsua_acc_id: (active: Bool, code: Int32,
+                                               expiration: UInt32)] = [:]
+
 private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointer<pjsua_reg_info>?) {
     assertOnRegisteredPJThread()
     guard let regInfo = info?.pointee else {
-        pjsuaEventSink?.yield(.registrationState(
+        // No reg_info at all is a terminal report — guaranteed channel (see below).
+        // It also ends the epoch: clear the dedup entry or a later recovery whose tuple
+        // happens to equal the cached active one would emit only to the lossy stream.
+        regDedupLock.lock()
+        lastEmittedRegState[accId] = nil
+        regDedupLock.unlock()
+        emitCall(.registrationState(
             account: AccountID(accId), active: false, statusCode: 0, expiration: 0
         ))
         return
@@ -187,10 +307,24 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     // "Active" = a renewing registration that the server accepted (2xx) with a live
     // expiration. A successful un-REGISTER (renewing == false, expiration == 0) is inactive.
     let active = renewing && (Int32(PJSIP_SC_OK.rawValue) ..< 300).contains(statusCode) && expiration > 0
-    pjsuaEventSink?.yield(.registrationState(
+    // Every registration *transition* goes on the guaranteed channel — the single ordered,
+    // authoritative path for account state. Identical renewal heartbeats emit only to the
+    // bounded `events` record: they are periodic, self-replacing, and would otherwise grow
+    // the unbounded `callEvents` buffer forever when nobody consumes it.
+    let event = PJSUAEvent.registrationState(
         account: AccountID(accId),
         active: active,
         statusCode: statusCode,
         expiration: expiration
-    ))
+    )
+    regDedupLock.lock()
+    let tuple = (active: active, code: statusCode, expiration: expiration)
+    let duplicate = lastEmittedRegState[accId].map { $0 == tuple } ?? false
+    lastEmittedRegState[accId] = active ? tuple : nil
+    regDedupLock.unlock()
+    if duplicate {
+        emit(event) // heartbeat — record only, not lifecycle
+    } else {
+        emitCall(event)
+    }
 }

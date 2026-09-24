@@ -76,7 +76,8 @@ event stream to (a) update CallKit as the SIP call progresses, or (b) resolve Ca
 once the engine reaches the right state. That consumer is the heart of this milestone.
 
 **Proposal: `CallSessionRouter` (actor in SwiftPJSUAKit).**
-- Owns a single `Task` that iterates `engine.events` for the process lifetime.
+- Owns the `Task`s that iterate the engine streams for the process lifetime —
+  `engine.callEvents` (guaranteed lifecycle) and `engine.events` (bounded telemetry).
 - Maps each engine event onto CallKit provider reports (see tables in §3) — e.g.
   `.callState(.disconnected, lastStatus: 487)` → `provider.reportCall(with:endedAt:reason:.remoteEnded/.unanswered)`.
 - Holds the **pending-action table**: when CallKit asks us to perform an action that completes
@@ -94,8 +95,8 @@ to correlate actions ↔ events. (swift-concurrency skill: prefer one structured
 mutable correlation state behind an actor.)
 
 ```
-                         engine.events (AsyncStream<PJSUAEvent>)
-                                   │  (one consumer Task)
+              engine.callEvents (unbounded) + engine.events (bounded)
+                              │  (one consumer Task each)
         ┌──────────────────────────▼───────────────────────────┐
         │                 CallSessionRouter (actor)             │
         │  • event → CallKit report   • pending CXAction table   │
@@ -360,8 +361,8 @@ video stream start/stop. All are simple pjsua1 calls run on the engine actor.
 
 ## 12. Sign-off checklist (the expensive-to-reverse calls)
 
-1. **D-ROUTER** — add `CallSessionRouter` as the single `engine.events` consumer + CXAction
-   correlation owner. *(Recommend: yes.)*
+1. **D-ROUTER** — add `CallSessionRouter` as the single consumer of the engine event
+   streams + CXAction correlation owner. *(Recommend: yes.)*
 2. **D-MEDIA** — change `PJSUAEvent.callMediaState` from one `CallMediaStatus` to per-stream
    `[CallMediaInfo]` (audio+video, status, direction, conf slot / video window). *(Recommend: yes —
    this is the contract; cheapest to change now.)*

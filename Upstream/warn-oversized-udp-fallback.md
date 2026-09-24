@@ -1,3 +1,13 @@
+---
+area: transport-udp
+kind: bug
+status: merged
+tracker:
+  issue: pjsip/pjproject#5075
+  pr: pjsip/pjproject#5076
+  docs_pr: pjsip/pjproject_docs#67
+---
+
 # Tracked issue draft — silent UDP fallback + docs gap for the §18.1.1 TCP switch
 
 For `pjsip/pjproject`. Pairs with fork PR

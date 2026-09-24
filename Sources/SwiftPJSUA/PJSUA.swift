@@ -23,8 +23,20 @@ public actor PJSUA {
         executor.asUnownedSerialExecutor()
     }
 
-    /// Lifecycle events from PJSUA, as a cancellable async sequence.
+    /// The complete event record from PJSUA, as a cancellable async sequence. Bounded
+    /// newest-first (64): under burst or with no consumer, newest telemetry wins — a
+    /// deliberate contract, since everything exclusive to this channel is periodic or
+    /// informational. For the events whose loss is unrecoverable, see
+    /// ``callEvents`` (TD-3).
     public nonisolated let events: AsyncStream<PJSUAEvent>
+
+    /// Guaranteed-delivery channel for the unrecoverable subset — `.incomingCall`,
+    /// `.callState`, `.callMediaState`, `.streamDestroyed`, every `.registrationState`
+    /// *transition* (the single ordered, authoritative path for account state — identical
+    /// renewal heartbeats stay on ``events`` only), and one-shot media errors — each also
+    /// delivered to ``events``. Unbounded by design: only real state changes land here,
+    /// so an idle engine produces nothing.
+    public nonisolated let callEvents: AsyncStream<PJSUAEvent>
 
     enum State { case idle, running, stopped }
     private(set) var state: State = .idle
@@ -74,8 +86,10 @@ public actor PJSUA {
     }
 
     public init() {
-        // Install the global event sink before anything can start delivering callbacks.
-        self.events = makePJSUAEventStream()
+        // Install the global event sinks before anything can start delivering callbacks.
+        let streams = makePJSUAEventStreams()
+        self.events = streams.events
+        self.callEvents = streams.callEvents
         self.executor = PJSIPExecutor()
     }
 
@@ -89,6 +103,31 @@ public actor PJSUA {
         // 1. create — initializes PJLIB; THIS thread becomes the registered main thread.
         try pjsua_create().throwIfFailed()
         executor.registerThisThread(name: "swift-pjsua.engine") // defensive no-op
+
+        // 1a. Keep the RFC 3261 §18.1.1 UDP→TCP size switch enabled.
+        //
+        // `sip_util.c:1419` guards the whole §18.1.1 block on `disable_tcp_switch == 0` — size
+        // check and TCP-transport lookup alike. With the switch off, an authenticated INVITE —
+        // which crosses the 1300-byte threshold once the digest is added — is sent over UDP
+        // anyway, fragments, and is dropped: no call over a UDP transport can ever be
+        // established. Measured at two independent providers
+        // (offhook docs/SIP-Test-Infrastructure.md §6).
+        //
+        // KEPT DELIBERATELY, though it is now belt-and-braces. `swift-pjsip` 0.1.x compiled the
+        // binary with `PJSIP_DONT_SWITCH_TO_TCP 1` — the *opposite* of pjsip's default — and this
+        // line was the only thing making UDP calling work at all. 0.2.0 drops that define, so a
+        // current binary already has the switch on. The line stays because the package resolves
+        // by range: an engine built against an older swift-pjsip would silently lose UDP calling
+        // again, and re-asserting the pjsip default costs one store.
+        //
+        // Set at runtime because the compile-time macro lives in a prebuilt binary. The
+        // placement is convention, not a requirement: `pjsua_init()` never reads this field.
+        // `pjsip_cfg()->endpt.disable_tcp_switch` (`pjsip/sip_config.h:111`) is read *per send*,
+        // in the RFC 3261 §18.1.1 block of `pjsip_endpt_send_request`'s path
+        // (`sip_util.c:1419`), so it only has to be settled before the first request leaves.
+        // Setting it beside the rest of the endpoint configuration is simply the earliest
+        // point at which it is obviously done once.
+        pjsip_cfg().pointee.endpt.disable_tcp_switch = 0
 
         // 2. configure: callbacks + logging + media.
         var cfg = pjsua_config()
@@ -155,7 +194,7 @@ public actor PJSUA {
         // later start() cannot resolve a transportName to a dead transport.
         transportIDs.removeAll()
         accountParameters.removeAll()
-        finishPJSUAEventStream()
+        finishPJSUAEventStreams()
         executor.stop()
     }
 }

@@ -1,3 +1,12 @@
+---
+area: rfc5626-outbound
+kind: bug
+status: merged
+verified: 77ad3feec
+tracker:
+  pr: pjsip/pjproject#5154
+---
+
 ### Describe the bug
 
 A 439 (`PJSIP_SC_FIRST_HOP_LACKS_OUTBOUND_SUPPORT`) response to REGISTER is never handled, and the account is left permanently unregistered.

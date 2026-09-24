@@ -66,3 +66,26 @@ which is the point of preventing re-entrancy by construction rather than by conv
 
 `Configuration-Design.md` (D-CONFIG-2 uses the same prevent-by-construction approach for actor
 re-entrancy); `Tech-Debt.md` TD-19; `PJSUACallbacks.swift` carries the callback table inline.
+
+## Addendum 2026-08-17 — two contexts found while mapping call termination
+
+From the call-lifecycle pass ([Call-Termination-Paths](./Call-Termination-Paths.md)), verified
+against fork `cb0544e0d`. Neither callback is installed yet; both are proposed in
+[TD-27](./Tech-Debt.md), and their contexts belong in this table before they are.
+
+- **`on_stream_destroyed` runs with `PJSUA_LOCK` HELD.** The chain is
+  `pjsua_media_channel_deinit()` (`pjsua_media.c:3601`) → `stop_media_session()` (`:3628`) →
+  `pjsua_aud_stop_stream()` (`pjsua_aud.c:509`) → the callback (`:553-557`), and on the disconnect
+  path the caller wraps the whole thing in `PJSUA_LOCK()`/`PJSUA_UNLOCK()`
+  (`pjsua_call.c:5458-5464`). Contrast `on_call_state`, which pjsua deliberately defers until
+  *after* `PJSUA_RELEASE_LOCK()` (`:5467-5468`, `:5486-5487`) with the comment "Release locks before
+  calling callbacks, to avoid deadlock." **This is stricter than every callback in the G2 table
+  above** — it joins the `PJSUA_LOCK`-held group, and G2 is not merely tidy here, it is the only
+  thing preventing an ABBA deadlock.
+- **`on_call_media_event` does NOT run on the media thread.** `call_media_on_event()` copies the
+  event and defers delivery through a 1 ms timer,
+  `pjsua_schedule_timer2(&call_med_event_cb, eve, 1)` (`pjsua_media.c:1942`), so the app callback
+  runs on the **timer thread** with no pjsua lock held. A third context, distinct from both groups
+  above. The same deferral applies to the ICE/SRTP-failure notification, which reaches
+  `on_call_media_state` via `ice_failed_nego_cb` on a 1 ms timer (`pjsua_media.c:1089-1090`,
+  `:1992-1993`).

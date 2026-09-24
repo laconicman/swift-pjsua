@@ -1,3 +1,13 @@
+---
+area: acc-table
+kind: bug
+status: merged
+verified: 54ebfdbec
+tracker:
+  issue: pjsip/pjproject#5069
+  pr: pjsip/pjproject#5070
+---
+
 # `pjsua_acc_add` aborts debug builds when the account table is full
 
 Upstream note for `pjsip/pjproject`. **Status: re-verified 2026-07-11 against live master

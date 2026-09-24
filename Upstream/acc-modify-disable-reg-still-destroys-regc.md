@@ -1,3 +1,10 @@
+---
+area: acc-modify
+kind: docs
+status: ready
+verified: 27d28485f
+---
+
 # `disable_reg_on_modify` destroys the registration client — the docs still describe the pre-#4509 behaviour
 
 Upstream note for `pjsip/pjproject`. **Status: verified 2026-08-17 against `upstream/master`

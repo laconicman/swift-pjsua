@@ -1,3 +1,9 @@
+---
+area: pjproject-bump
+kind: reference
+status: current
+---
+
 # Post-2.16 pjproject fixes — impact scan for swift-pjsip/swift-pjsua
 
 Reverse-scan of upstream fixes landed **after the 2.16 tag** (~2025-11-26), assessed against

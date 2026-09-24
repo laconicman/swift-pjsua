@@ -4,8 +4,9 @@ import os
 import PJSIP
 import SwiftPJSUA
 
-/// The single consumer of ``PJSUA/events`` and the correlation hub between CallKit and the SIP
-/// engine (design §2, **D-ROUTER**). One long-lived `Task` iterates the engine event stream and:
+/// The single consumer of ``PJSUA/callEvents`` and ``PJSUA/events``, and the correlation hub
+/// between CallKit and the SIP engine (design §2, **D-ROUTER**). Long-lived `Task`s iterate
+/// the guaranteed lifecycle channel and the bounded telemetry stream respectively, and:
 ///
 /// - maps each engine event onto a CallKit provider report (incoming/outgoing/ended — §3);
 /// - owns the **pending-action table**, stashing `CXAction`s whose SIP outcome is asynchronous
@@ -23,6 +24,7 @@ public actor CallSessionRouter {
     private let engine: PJSUA
     private let provider: CXProvider
     private let registry: CallRegistry
+    private let callEvents: AsyncStream<PJSUAEvent>
     private let events: AsyncStream<PJSUAEvent>
 
     /// Account used for outgoing calls (`CXStartCallAction`). The app sets this (via
@@ -30,8 +32,8 @@ public actor CallSessionRouter {
     /// a `CXStartCallAction` arriving while it is `nil` fails (nowhere to place the call from).
     private var outgoingAccount: AccountID?
 
-    /// App-facing relay of `.registrationState` events. The router consumes the engine stream
-    /// **exclusively** (it is single-consumer), and registration has no CallKit mapping (§3) —
+    /// App-facing relay of `.registrationState` transitions. The router consumes the engine streams
+    /// **exclusively** (they are single-consumer), and registration has no CallKit mapping (§3) —
     /// so the app's account UI observes it here instead of reading `engine.events` itself.
     ///
     /// `@MainActor` by type, so the closure body runs on the main actor: the app updates UI
@@ -41,6 +43,80 @@ public actor CallSessionRouter {
                                                                   _ statusCode: Int32,
                                                                   _ expiration: UInt32) -> Void
     private var registrationObserver: RegistrationObserver?
+
+    /// App-facing relay of **every** event the router processes — the multicast tap that makes
+    /// the single-consumer streams observable (diagnostics views, media-error policy, the
+    /// FieldKit harness). Without it, events the router handles but doesn't map to CallKit
+    /// (`.streamDestroyed`, `.callMediaEvent`, `.registrationState`) are invisible to
+    /// the app: an `AsyncStream` cannot broadcast a consumed event to a second subscriber.
+    ///
+    /// Delivery semantics mirror the engine's channels exactly: call-scoped events
+    /// (`.incomingCall`, `.callState`, `.callMediaState`, `.streamDestroyed`), **every**
+    /// `.registrationState` transitions, and one-shot media errors (`.mediaTransportError`,
+    /// `.audioDeviceError`) arrive on the guaranteed channel — unbounded, ordered, never
+    /// dropped; periodic `.callMediaEvent(.other)` arrives on the bounded telemetry channel
+    /// and may drop under burst. Each event is delivered **once**: lossy `events` copies of
+    /// guaranteed-channel events are consumed but not re-forwarded, and identical
+    /// `.registrationState` renewals collapse to one observation per transition
+    /// (``relayRegistration``).
+    ///
+    /// `@MainActor` by type, like ``RegistrationObserver`` — update UI directly.
+    public typealias EventObserver = @MainActor @Sendable (PJSUAEvent) -> Void
+    private var eventObserver: EventObserver?
+
+    /// Last registration tuple relayed to the observers, per account. Renewals repeat an
+    /// identical tuple every expiry interval — relay only on change. Cleared when an
+    /// inactive report relays (the epoch ended), so a recycled `AccountID` cannot inherit
+    /// the previous account's deduplication state.
+    private struct RegistrationSnapshot: Equatable {
+        let active: Bool
+        let statusCode: Int32
+        let expiration: UInt32
+    }
+    private var lastRegistrationRelay: [AccountID: RegistrationSnapshot] = [:]
+
+    /// Serial delivery chain for observer callbacks. Both observer types are `@MainActor`,
+    /// and `handle` must never block CallKit work on app code (a slow observer awaiting a
+    /// main-actor hop could delay an incoming-call report). Each delivery chains behind the
+    /// previous one, so observers still see the router's order — they just can't stall it.
+    /// The observer is captured at enqueue time: a later `set…Observer` doesn't redirect
+    /// already-queued deliveries.
+    private var observerTail: Task<Void, Never>?
+    /// Queued-but-undelivered observer callbacks — bounds the task chain: a wedged
+    /// `@MainActor` observer otherwise turns periodic telemetry into unbounded task growth.
+    private var pendingObserverDeliveries = 0
+    /// Backlog depth at which droppable deliveries are skipped. Sized with the telemetry
+    /// stream in mind — deeper than this means the observer is wedged, not busy.
+    /// Guaranteed-channel events deliberately bypass the cap: they are activity-bounded
+    /// (O(calls × states), not per-frame), and dropping them would silently corrupt the
+    /// tap's every-transition contract — a permanently wedged observer is an app bug the
+    /// tap cannot heal either way.
+    private static let maxPendingObserverDeliveries = 32
+
+    /// Enqueue a `@MainActor` observer delivery without awaiting it. `droppingIfBusy`
+    /// marks the delivery as best-effort telemetry: when the backlog is deep, periodic
+    /// events are skipped rather than piled onto the chain — the same loss trade the
+    /// bounded `events` stream already makes for them.
+    private func deliverToObserver(droppingIfBusy: Bool = false,
+                                   _ delivery: @escaping @MainActor @Sendable () -> Void) {
+        if droppingIfBusy && pendingObserverDeliveries >= Self.maxPendingObserverDeliveries {
+            return
+        }
+        pendingObserverDeliveries += 1
+        let previous = observerTail
+        observerTail = Task {
+            await previous?.value
+            await delivery()
+            pendingObserverDeliveries -= 1
+        }
+    }
+
+    /// Suspend until every queued observer delivery has run. Internal for `@testable` —
+    /// production callers must not await observer work (that would re-couple the paths
+    /// ``deliverToObserver`` decouples).
+    func drainObservers() async {
+        await observerTail?.value
+    }
 
     /// Connection-establishing / hold actions awaiting the engine event that resolves them.
     /// Keyed by CallKit `UUID`; at most one outstanding per call in this skeleton (answer→hold are
@@ -62,6 +138,7 @@ public actor CallSessionRouter {
     private var groupAdjacency: [UUID: Set<UUID>] = [:]
 
     private var consumer: Task<Void, Never>?
+    private var telemetryConsumer: Task<Void, Never>?
 
     /// Periodic TTL sweep of orphaned *pending* registry entries — a VoIP push reported a call
     /// whose INVITE never arrived. Withdraws the stale ringing CallKit report (see
@@ -79,16 +156,26 @@ public actor CallSessionRouter {
         self.engine = engine
         self.provider = provider
         self.registry = registry
+        self.callEvents = engine.callEvents
         self.events = engine.events
     }
 
     /// Start consuming engine events. Idempotent; safe to call once at app start.
     public func start() {
         guard consumer == nil else { return }
-        let stream = events // captured by value (AsyncStream is Sendable); iterated off-actor.
+        // Captured by value (AsyncStream is Sendable); iterated off-actor.
+        let callEvents = callEvents
+        let events = events
+        // Lifecycle arrives on the guaranteed channel, where ordering is preserved — an
+        // `.incomingCall` is always handled before that call's `.callState`s.
         consumer = Task { [weak self] in
-            for await event in stream {
+            for await event in callEvents {
                 await self?.handle(event)
+            }
+        }
+        telemetryConsumer = Task { [weak self] in
+            for await event in events {
+                await self?.handleTelemetry(event)
             }
         }
         sweeper = Task { [weak self] in
@@ -109,6 +196,12 @@ public actor CallSessionRouter {
     /// on the main actor — update UI directly; no manual thread hop needed.
     public func setRegistrationObserver(_ observer: RegistrationObserver?) {
         registrationObserver = observer
+    }
+
+    /// Set (or clear) the app's event observer — the multicast tap for events the router
+    /// processes. See ``EventObserver`` for the delivery semantics.
+    public func setEventObserver(_ observer: EventObserver?) {
+        eventObserver = observer
     }
 
     // MARK: Incoming report (push or socket)
@@ -272,7 +365,15 @@ public actor CallSessionRouter {
 
     // MARK: Engine event → CallKit
 
-    private func handle(_ event: PJSUAEvent) async {
+    /// Internal (not `private`) so tests can drive the handlers directly via `@testable` —
+    /// the streams themselves can't be injected without a running engine.
+    func handle(_ event: PJSUAEvent) async {
+        // Observe before acting: the tap sees the event regardless of what CallKit does
+        // with it. `.registrationState` is excluded here — it reaches the tap through the
+        // transition-deduplicated ``relayRegistration`` path instead.
+        if case .registrationState = event { } else {
+            deliverToObserver { [eventObserver] in eventObserver?(event) }
+        }
         switch event {
         case let .incomingCall(_, call, sipCallID, from, offeredVideo):
             do {
@@ -297,8 +398,49 @@ public actor CallSessionRouter {
             handleMediaState(call: call, media: media)
 
         case let .registrationState(account, active, statusCode, expiration):
-            // No CallKit mapping (§3) — relay to the app's account UI on the main actor.
-            await registrationObserver?(account, active, statusCode, expiration)
+            // No CallKit mapping (§3) — deduplicated relay to the app's observers.
+            await relayRegistration(account: account, active: active,
+                                    statusCode: statusCode, expiration: expiration)
+
+        case .streamDestroyed, .callMediaEvent:
+            // No CallKit mapping either, and deliberately not invented: neither event ends a
+            // call, and CallKit has no vocabulary for "still connected, but the media is dead".
+            // Already forwarded to the eventObserver above — end-of-stream statistics and
+            // media-failure policy are the app's (offhook OH-10).
+            break
+        }
+    }
+
+    /// The bounded `events` stream is either lossy twins or heartbeat: every case that
+    /// lands on `callEvents` (call-scoped events, registration *transitions*, one-shot
+    /// media errors) has its authoritative delivery there, and identical renewal
+    /// heartbeats are telemetry-exclusive but deliberately unrelayed — observers track
+    /// transitions, not pulse. The one payload forwarded from here is
+    /// `.callMediaEvent(.other)` — periodic, informational, and droppable under backlog.
+    /// Internal (not `private`) for the same @testable reason as ``handle(_:)``.
+    func handleTelemetry(_ event: PJSUAEvent) async {
+        if case .callMediaEvent(_, _, .other) = event {
+            deliverToObserver(droppingIfBusy: true) { [eventObserver] in
+                eventObserver?(event)
+            }
+        }
+    }
+
+    /// Relay one registration report to ``registrationObserver`` and ``eventObserver``,
+    /// but only when it carries a *changed* tuple — renewals repeat an identical report
+    /// every expiry interval and only transitions are worth observing. An inactive report
+    /// additionally **clears** the snapshot: it ends the registration epoch, so a reused
+    /// `AccountID` cannot inherit the previous account's deduplication state.
+    private func relayRegistration(account: AccountID, active: Bool,
+                                   statusCode: Int32, expiration: UInt32) async {
+        let snapshot = RegistrationSnapshot(active: active, statusCode: statusCode,
+                                            expiration: expiration)
+        guard lastRegistrationRelay[account] != snapshot else { return }
+        lastRegistrationRelay[account] = active ? snapshot : nil
+        deliverToObserver { [registrationObserver, eventObserver] in
+            registrationObserver?(account, active, statusCode, expiration)
+            eventObserver?(.registrationState(account: account, active: active,
+                                              statusCode: statusCode, expiration: expiration))
         }
     }
 

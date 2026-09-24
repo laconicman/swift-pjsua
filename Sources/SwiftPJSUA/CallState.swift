@@ -2,7 +2,7 @@ import PJSIP
 
 /// The INVITE-session lifecycle, mirrored from `pjsip_inv_state` so callers don't have to
 /// import the C enum. The `pj_status_t` returned by `pjsua_call_make_call` only tells you
-/// the INVITE was *sent*; the real lifecycle arrives as these states via `PJSUA.events`.
+/// the INVITE was *sent*; the real lifecycle arrives as these states via `PJSUA.callEvents`.
 public enum CallState: Sendable, Equatable {
     case null, calling, incoming, early, connecting, confirmed, disconnected
     case unknown(Int32)

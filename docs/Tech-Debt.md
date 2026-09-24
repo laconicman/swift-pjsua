@@ -38,31 +38,22 @@ are provisional. A server UUID in the VoIP payload is preferred over the `Call-I
 - Refs: RFC 8599 <https://www.rfc-editor.org/rfc/rfc8599>; PushKit
   <https://developer.apple.com/documentation/pushkit/pkpushregistrydelegate>.
 
-## TD-3 — event-stream buffering drops oldest under burst · open
-`makePJSUAEventStream()` uses `AsyncStream` `.bufferingNewest(64)`. If the single router consumer
-ever falls far behind a callback burst, the **oldest** events are discarded. A dropped
-`.callState(.disconnected)` could in principle strand a CallKit call — partially mitigated because
-the `CallRegistry` TTL sweep (TD/roadmap §6.5) withdraws stale *pending* reports, but a *bound*
-call relies on receiving its terminal event. Revisit the policy (unbounded vs. explicit
-back-pressure) during M4 hardening; the consumer is `await`-driven on the engine actor so sustained
-overflow is unlikely in practice.
+## TD-3 — event-stream buffering · resolved (unbounded)
+`makePJSUAEventStream()` used `AsyncStream` `.bufferingNewest(64)`, which discarded the **oldest**
+events under burst. Two payloads made any bound wrong, not just hard to size: a dropped
+`.callState(.disconnected)` strands a CallKit call — the router has no query to re-read a terminal
+state, so the earlier "costs you the edge, not the fact" line was wrong — and a dropped
+`.streamDestroyed` loses the only copy of the stream's statistics (TD-27): `CallStreamStatistics`
+is read from the `pjmedia_stream *` inside the callback, and the stream is destroyed 17 lines
+later (`pjsua_aud.c:573`). A teardown burst is exactly when both arrive together.
 
-**The stakes changed when `.streamDestroyed` was installed (TD-27), and this entry has to say so.**
-Every other event on this stream is a *notification about state the app can re-read* — a dropped
-`.callState` costs you the edge, not the fact, and the fact is still queryable. `.streamDestroyed`
-is the first event whose payload exists **nowhere else**: `CallStreamStatistics` is read from the
-`pjmedia_stream *` inside the callback, and the stream is destroyed 17 lines later
-(`pjsua_aud.c:573`). There is nothing to re-query. So overflow here is **data loss, not a missed
-notification**, and a teardown burst — the exact moment several calls end together — is when the
-buffer is most likely to overflow and when these events all arrive at once.
-
-That does not make `.bufferingNewest(64)` wrong today; it makes "is 64 enough" the wrong question.
-Whatever M4 decides, the sole-copy payload wants a policy that cannot silently drop it: a dedicated
-channel for statistics (TD-27's recommendation), unbounded buffering for that case, or moving the
-statistics off the event stream and into a store the app reads. Deciding it by tuning a number
-would be deciding it by accident.
+The resolution is deletion, not tuning: the stream is now unbounded. All producers are
+low-frequency (per-call/per-registration, not per-packet), so the practical bound is the
+consumer's own liveness — a stalled router is already a hang, buffer or no buffer. If a future
+high-frequency event lands on this stream, the question returns as a channel-split decision, not
+a number.
 - Refs: <https://developer.apple.com/documentation/swift/asyncstream/continuation/bufferingpolicy>;
-  TD-27 for the sole-copy payload and the dedicated-channel recommendation.
+  TD-27 for the sole-copy payload.
 
 ## TD-4 — `CXProvider` captured by a `Sendable` actor · open (documented-safe)
 `CallSessionRouter` is an `actor` (hence `Sendable`) but holds a `CXProvider`, which is **not**
@@ -290,8 +281,8 @@ every path that kills a call *without ending it* is invisible.**
   [Call-Termination-Paths](./Call-Termination-Paths.md) §4. Consumers cannot even implement their own
   detection from what we currently emit, because none of the failure signals reach Swift.
 - **Discharge.** Install the four callbacks as `PJSUAEvent` cases (or, for statistics, a dedicated
-  channel — TD-3's `.bufferingNewest(64)` drops the *oldest*, and losing a record loses a whole
-  call's data). Plus a regression test pinning the `hanging_up` ordering
+  channel — TD-3 made the stream unbounded, so the argument is decoupling statistics from event
+  ordering, not drop protection). Plus a regression test pinning the `hanging_up` ordering
   (`pjsua_call.c:3410-3414`): the deinit precedes the flag, which is the *only* reason local hangups
   produce statistics at all, and nothing upstream promises it.
 - **Sequencing.** Install only what §3/§4 of `../../TASK-code-call-lifecycle-verification.md`

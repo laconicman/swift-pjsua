@@ -54,9 +54,9 @@ private nonisolated(unsafe) var pjsuaEventSink: AsyncStream<PJSUAEvent>.Continua
 /// Create the event stream and install its continuation as the process-global sink.
 /// Called once from `PJSUA.init` before anything can start delivering callbacks.
 func makePJSUAEventStream() -> AsyncStream<PJSUAEvent> {
-    let (stream, continuation) = AsyncStream<PJSUAEvent>.makeStream(
-        bufferingPolicy: .bufferingNewest(64)
-    )
+    // Unbounded: a dropped `.callState(.disconnected)` strands a CallKit call, and a
+    // dropped `.streamDestroyed` loses the only copy of the stream's statistics (TD-3).
+    let (stream, continuation) = AsyncStream<PJSUAEvent>.makeStream()
     pjsuaEventSink = continuation
     return stream
 }

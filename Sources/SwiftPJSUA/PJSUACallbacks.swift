@@ -261,7 +261,8 @@ private func pjsuaOnCallMediaEvent(_ callId: pjsua_call_id,
 private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointer<pjsua_reg_info>?) {
     assertOnRegisteredPJThread()
     guard let regInfo = info?.pointee else {
-        emit(.registrationState(
+        // No reg_info at all is a terminal report — guaranteed channel (see below).
+        emitCall(.registrationState(
             account: AccountID(accId), active: false, statusCode: 0, expiration: 0
         ))
         return
@@ -277,10 +278,15 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     // "Active" = a renewing registration that the server accepted (2xx) with a live
     // expiration. A successful un-REGISTER (renewing == false, expiration == 0) is inactive.
     let active = renewing && (Int32(PJSIP_SC_OK.rawValue) ..< 300).contains(statusCode) && expiration > 0
-    emit(.registrationState(
+    // Terminal reports (auth failure, un-REGISTER) are one-shot: dropped from the bounded
+    // stream they would leave a stale "registered" standing with no renewal to correct it,
+    // so they go on the guaranteed channel. Active renewals stay on `events` — the next
+    // renewal always replaces a dropped copy.
+    let event = PJSUAEvent.registrationState(
         account: AccountID(accId),
         active: active,
         statusCode: statusCode,
         expiration: expiration
-    ))
+    )
+    if active { emit(event) } else { emitCall(event) }
 }

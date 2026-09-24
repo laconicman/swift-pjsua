@@ -4,8 +4,9 @@ import os
 import PJSIP
 import SwiftPJSUA
 
-/// The single consumer of ``PJSUA/events`` and the correlation hub between CallKit and the SIP
-/// engine (design §2, **D-ROUTER**). One long-lived `Task` iterates the engine event stream and:
+/// The single consumer of ``PJSUA/callEvents`` and ``PJSUA/events``, and the correlation hub
+/// between CallKit and the SIP engine (design §2, **D-ROUTER**). Long-lived `Task`s iterate
+/// the guaranteed lifecycle channel and the bounded telemetry stream respectively, and:
 ///
 /// - maps each engine event onto a CallKit provider report (incoming/outgoing/ended — §3);
 /// - owns the **pending-action table**, stashing `CXAction`s whose SIP outcome is asynchronous
@@ -23,6 +24,7 @@ public actor CallSessionRouter {
     private let engine: PJSUA
     private let provider: CXProvider
     private let registry: CallRegistry
+    private let callEvents: AsyncStream<PJSUAEvent>
     private let events: AsyncStream<PJSUAEvent>
 
     /// Account used for outgoing calls (`CXStartCallAction`). The app sets this (via
@@ -30,8 +32,8 @@ public actor CallSessionRouter {
     /// a `CXStartCallAction` arriving while it is `nil` fails (nowhere to place the call from).
     private var outgoingAccount: AccountID?
 
-    /// App-facing relay of `.registrationState` events. The router consumes the engine stream
-    /// **exclusively** (it is single-consumer), and registration has no CallKit mapping (§3) —
+    /// App-facing relay of `.registrationState` events. The router consumes the engine streams
+    /// **exclusively** (they are single-consumer), and registration has no CallKit mapping (§3) —
     /// so the app's account UI observes it here instead of reading `engine.events` itself.
     ///
     /// `@MainActor` by type, so the closure body runs on the main actor: the app updates UI
@@ -62,6 +64,7 @@ public actor CallSessionRouter {
     private var groupAdjacency: [UUID: Set<UUID>] = [:]
 
     private var consumer: Task<Void, Never>?
+    private var telemetryConsumer: Task<Void, Never>?
 
     /// Periodic TTL sweep of orphaned *pending* registry entries — a VoIP push reported a call
     /// whose INVITE never arrived. Withdraws the stale ringing CallKit report (see
@@ -79,16 +82,26 @@ public actor CallSessionRouter {
         self.engine = engine
         self.provider = provider
         self.registry = registry
+        self.callEvents = engine.callEvents
         self.events = engine.events
     }
 
     /// Start consuming engine events. Idempotent; safe to call once at app start.
     public func start() {
         guard consumer == nil else { return }
-        let stream = events // captured by value (AsyncStream is Sendable); iterated off-actor.
+        // Captured by value (AsyncStream is Sendable); iterated off-actor.
+        let callEvents = callEvents
+        let events = events
+        // Lifecycle arrives on the guaranteed channel, where ordering is preserved — an
+        // `.incomingCall` is always handled before that call's `.callState`s.
         consumer = Task { [weak self] in
-            for await event in stream {
+            for await event in callEvents {
                 await self?.handle(event)
+            }
+        }
+        telemetryConsumer = Task { [weak self] in
+            for await event in events {
+                await self?.handleTelemetry(event)
             }
         }
         sweeper = Task { [weak self] in
@@ -305,6 +318,16 @@ public actor CallSessionRouter {
             // call, and CallKit has no vocabulary for "still connected, but the media is dead".
             // End-of-stream statistics and media-failure policy are the app's (offhook OH-10).
             break
+        }
+    }
+
+    /// The bounded `events` stream carries the telemetry cases — `.registrationState`
+    /// is relayed to the app's observer; `.callMediaEvent` has no CallKit mapping; the
+    /// call-scoped copies arriving here are lossy duplicates already handled on
+    /// `callEvents`, so they are ignored rather than re-acted on.
+    private func handleTelemetry(_ event: PJSUAEvent) async {
+        if case let .registrationState(account, active, statusCode, expiration) = event {
+            await registrationObserver?(account, active, statusCode, expiration)
         }
     }
 

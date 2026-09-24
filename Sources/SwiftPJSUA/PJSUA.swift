@@ -23,8 +23,18 @@ public actor PJSUA {
         executor.asUnownedSerialExecutor()
     }
 
-    /// Lifecycle events from PJSUA, as a cancellable async sequence.
+    /// The complete event record from PJSUA, as a cancellable async sequence. Bounded
+    /// newest-first (64): under burst or with no consumer, newest telemetry wins — a
+    /// deliberate contract, since everything exclusive to this channel is periodic or
+    /// informational. For the call-scoped events whose loss is unrecoverable, see
+    /// ``callEvents`` (TD-3).
     public nonisolated let events: AsyncStream<PJSUAEvent>
+
+    /// Guaranteed-delivery channel for the call-scoped subset — `.incomingCall`,
+    /// `.callState`, `.callMediaState`, `.streamDestroyed` — each also delivered to
+    /// ``events``. Unbounded by design: these are per-call, so an unconsumed buffer
+    /// grows only with real call activity and an idle engine produces none.
+    public nonisolated let callEvents: AsyncStream<PJSUAEvent>
 
     enum State { case idle, running, stopped }
     private(set) var state: State = .idle
@@ -74,8 +84,10 @@ public actor PJSUA {
     }
 
     public init() {
-        // Install the global event sink before anything can start delivering callbacks.
-        self.events = makePJSUAEventStream()
+        // Install the global event sinks before anything can start delivering callbacks.
+        let streams = makePJSUAEventStreams()
+        self.events = streams.events
+        self.callEvents = streams.callEvents
         self.executor = PJSIPExecutor()
     }
 
@@ -180,7 +192,7 @@ public actor PJSUA {
         // later start() cannot resolve a transportName to a dead transport.
         transportIDs.removeAll()
         accountParameters.removeAll()
-        finishPJSUAEventStream()
+        finishPJSUAEventStreams()
         executor.stop()
     }
 }

@@ -38,20 +38,26 @@ are provisional. A server UUID in the VoIP payload is preferred over the `Call-I
 - Refs: RFC 8599 <https://www.rfc-editor.org/rfc/rfc8599>; PushKit
   <https://developer.apple.com/documentation/pushkit/pkpushregistrydelegate>.
 
-## TD-3 — event-stream buffering · resolved (unbounded)
+## TD-3 — event-stream buffering · resolved (two channels)
 `makePJSUAEventStream()` used `AsyncStream` `.bufferingNewest(64)`, which discarded the **oldest**
-events under burst. Two payloads made any bound wrong, not just hard to size: a dropped
-`.callState(.disconnected)` strands a CallKit call — the router has no query to re-read a terminal
-state, so the earlier "costs you the edge, not the fact" line was wrong — and a dropped
-`.streamDestroyed` loses the only copy of the stream's statistics (TD-27): `CallStreamStatistics`
-is read from the `pjmedia_stream *` inside the callback, and the stream is destroyed 17 lines
-later (`pjsua_aud.c:573`). A teardown burst is exactly when both arrive together.
+events under burst. Some payloads make any bound wrong, not just hard to size: a dropped
+`.incomingCall` means a call that never rings; a dropped `.callState(.disconnected)` strands a
+CallKit call — the router has no query to re-read a terminal state — a dropped `.callMediaState`
+leaves a pending hold action unfulfilled; and a dropped `.streamDestroyed` loses the only copy
+of the stream's statistics (TD-27): `CallStreamStatistics` is read from the `pjmedia_stream *`
+inside the callback, and the stream is destroyed 17 lines later (`pjsua_aud.c:573`).
 
-The resolution is deletion, not tuning: the stream is now unbounded. All producers are
-low-frequency (per-call/per-registration, not per-packet), so the practical bound is the
-consumer's own liveness — a stalled router is already a hang, buffer or no buffer. If a future
-high-frequency event lands on this stream, the question returns as a channel-split decision, not
-a number.
+But an unbounded single stream fails the other direction: `PJSUA.events` is public and nothing
+requires a consumer, while `.registrationState` is a periodic producer — automatic renewals keep
+enqueueing for the engine's whole lifetime, so a never-iterated stream grows without bound.
+
+The resolution is a channel split, not a number. `events` stays the complete record, bounded
+newest-first at 64 — everything exclusive to it is either periodic (`.registrationState`
+re-arrives each renewal) or informational (`.callMediaEvent`), so drops converge. The
+unrecoverable subset — `.incomingCall`, `.callState`, `.callMediaState`, `.streamDestroyed` —
+also lands on `callEvents`, which is unbounded. Unbounded is affordable precisely there: these
+events are per-call, so an unconsumed buffer grows only with real call activity — an idle
+engine produces none — which is exactly the failure the single unbounded stream had.
 - Refs: <https://developer.apple.com/documentation/swift/asyncstream/continuation/bufferingpolicy>;
   TD-27 for the sole-copy payload.
 

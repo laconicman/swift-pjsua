@@ -44,26 +44,55 @@ import PJSIP
 //
 // Full findings: docs/Threading-Validation.md.
 //
-// `nonisolated(unsafe)` invariant: written exactly once via ``makePJSUAEventStream()`` in
+// `nonisolated(unsafe)` invariant: written exactly once via ``makePJSUAEventStreams()`` in
 // `PJSUA.init`, before `pjsua_start()` can fire any callback; read-only thereafter.
 // `AsyncStream.Continuation` is `Sendable` and its `yield` is thread-safe, so yielding
 // from PJSUA's worker-thread callbacks is safe. Removal plan: when pjsua gains per-instance
 // user-data on these callbacks, replace the global with that.
 private nonisolated(unsafe) var pjsuaEventSink: AsyncStream<PJSUAEvent>.Continuation?
+private nonisolated(unsafe) var pjsuaCallEventSink: AsyncStream<PJSUAEvent>.Continuation?
 
-/// Create the event stream and install its continuation as the process-global sink.
-/// Called once from `PJSUA.init` before anything can start delivering callbacks.
-func makePJSUAEventStream() -> AsyncStream<PJSUAEvent> {
-    // Unbounded: a dropped `.callState(.disconnected)` strands a CallKit call, and a
-    // dropped `.streamDestroyed` loses the only copy of the stream's statistics (TD-3).
-    let (stream, continuation) = AsyncStream<PJSUAEvent>.makeStream()
-    pjsuaEventSink = continuation
-    return stream
+/// Create the two event streams and install their continuations as the process-global
+/// sinks. Called once from `PJSUA.init` before anything can start delivering callbacks.
+///
+/// Two channels, two contracts (TD-3):
+/// - `events` is the complete record, bounded newest-first: every event lands here and
+///   telemetry may drop under pressure — it carries only periodic (`.registrationState`,
+///   re-delivered each renewal) or informational (`.callMediaEvent`) payloads besides
+///   the lossy copies of the call channel, so a drop converges instead of stranding.
+/// - `callEvents` is the guaranteed channel for the call-scoped events whose loss is
+///   unrecoverable — `.incomingCall` (call never rings), `.callState` (a dropped
+///   `.disconnected` strands a CallKit call), `.callMediaState` (a pending hold never
+///   fulfills), `.streamDestroyed` (the only copy of the final statistics). It is
+///   unbounded, which is affordable precisely here: these events are per-call, so an
+///   unconsumed buffer grows only with real call activity — an idle engine produces
+///   none, unlike the periodic renewals a single unbounded stream would have retained.
+func makePJSUAEventStreams() -> (events: AsyncStream<PJSUAEvent>,
+                                callEvents: AsyncStream<PJSUAEvent>) {
+    let (events, eventsContinuation) = AsyncStream<PJSUAEvent>.makeStream(
+        bufferingPolicy: .bufferingNewest(64))
+    let (callEvents, callContinuation) = AsyncStream<PJSUAEvent>.makeStream()
+    pjsuaEventSink = eventsContinuation
+    pjsuaCallEventSink = callContinuation
+    return (events, callEvents)
 }
 
-/// Finish the event stream (called from `PJSUA.shutdown`).
-func finishPJSUAEventStream() {
+/// Finish the event streams (called from `PJSUA.shutdown`).
+func finishPJSUAEventStreams() {
     pjsuaEventSink?.finish()
+    pjsuaCallEventSink?.finish()
+}
+
+/// Telemetry yield: the bounded `events` stream only.
+private func emit(_ event: PJSUAEvent) {
+    pjsuaEventSink?.yield(event)
+}
+
+/// Call-scoped yield: the guaranteed `callEvents` channel plus the `events` copy, so
+/// the complete record stays complete for consumers that want it.
+private func emitCall(_ event: PJSUAEvent) {
+    pjsuaCallEventSink?.yield(event)
+    pjsuaEventSink?.yield(event)
 }
 
 /// Wire the file-private C callbacks into a `pjsua_config`. The closures are
@@ -96,7 +125,7 @@ private func pjsuaOnCallState(_ callId: pjsua_call_id, _ event: UnsafeMutablePoi
     assertOnRegisteredPJThread()
     var info = pjsua_call_info()
     guard pjsua_call_get_info(callId, &info).isSuccess else { return }
-    pjsuaEventSink?.yield(.callState(
+    emitCall(.callState(
         call: CallID(callId),
         state: CallState(info.state),
         sipCallID: info.call_id.string,
@@ -117,7 +146,7 @@ private func pjsuaOnIncomingCall(_ accId: pjsua_acc_id,
     let from = haveInfo ? info.remote_info.string : nil
     // rem_vid_cnt > 0 when the remote offered ≥1 video stream → drives CXCallUpdate.hasVideo.
     let offeredVideo = haveInfo && info.rem_vid_cnt > 0
-    pjsuaEventSink?.yield(.incomingCall(
+    emitCall(.incomingCall(
         account: AccountID(accId),
         call: CallID(callId),
         sipCallID: sipCallID,
@@ -154,7 +183,7 @@ private func pjsuaOnCallMediaState(_ callId: pjsua_call_id) {
     }
     // Surface the full per-stream vector; the engine does not filter — the app/router
     // decides which streams/states matter (see `PJSUAEvent.callMediaState`).
-    pjsuaEventSink?.yield(.callMediaState(call: CallID(callId), media: media))
+    emitCall(.callMediaState(call: CallID(callId), media: media))
 }
 
 /// Build the per-stream media vector from a call's `media[]` C array (a fixed-size tuple in
@@ -202,7 +231,7 @@ private func pjsuaOnStreamDestroyed(_ callId: pjsua_call_id,
         codec = .init(name: "?", clockRate: 0, channels: 0, payloadType: 0)
     }
 
-    pjsuaEventSink?.yield(.streamDestroyed(
+    emitCall(.streamDestroyed(
         call: CallID(callId),
         mediaIndex: Int(streamIndex),
         statistics: CallStreamStatistics(kind: .audio,
@@ -222,7 +251,7 @@ private func pjsuaOnCallMediaEvent(_ callId: pjsua_call_id,
                                    _ event: UnsafeMutablePointer<pjmedia_event>?) {
     assertOnRegisteredPJThread()
     guard let event else { return }
-    pjsuaEventSink?.yield(.callMediaEvent(
+    emit(.callMediaEvent(
         call: CallID(callId),
         mediaIndex: Int(mediaIndex),
         event: CallMediaEvent(event.pointee)
@@ -232,7 +261,7 @@ private func pjsuaOnCallMediaEvent(_ callId: pjsua_call_id,
 private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointer<pjsua_reg_info>?) {
     assertOnRegisteredPJThread()
     guard let regInfo = info?.pointee else {
-        pjsuaEventSink?.yield(.registrationState(
+        emit(.registrationState(
             account: AccountID(accId), active: false, statusCode: 0, expiration: 0
         ))
         return
@@ -248,7 +277,7 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     // "Active" = a renewing registration that the server accepted (2xx) with a live
     // expiration. A successful un-REGISTER (renewing == false, expiration == 0) is inactive.
     let active = renewing && (Int32(PJSIP_SC_OK.rawValue) ..< 300).contains(statusCode) && expiration > 0
-    pjsuaEventSink?.yield(.registrationState(
+    emit(.registrationState(
         account: AccountID(accId),
         active: active,
         statusCode: statusCode,

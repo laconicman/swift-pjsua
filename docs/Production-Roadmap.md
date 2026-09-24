@@ -361,7 +361,8 @@ config + `reRegister` seam (§6.4); and `SwiftPJSUAKit` skeletons — `CallKitCo
 - **Per-stream media model (D-MEDIA).** `PJSUAEvent.callMediaState(call:media:[CallMediaInfo])` and
   `media[]` iteration in the callback (§6.3, D1 done).
 - **Engine mid-call commands.** `PJSUA.setHold`/`resume`/`setMute`/`sendDTMF` (+ `PJSUAUsageError`).
-- **`CallSessionRouter` (D-ROUTER).** The single consumer of `engine.events`; owns the pending-
+- **`CallSessionRouter` (D-ROUTER).** The single consumer of `engine.callEvents`/`engine.events`;
+  owns the pending-
   `CXAction` correlation table and the `CallRegistry` (sole writer after the initial report); maps
   engine events → CallKit provider reports.
 - **Full `CXProviderDelegate` action mapping (§10 + D-FULFILL).** `CallKitController` is now a thin

@@ -32,10 +32,11 @@ final class CallRegistryTests: XCTestCase {
         XCTAssertNil(entry)
     }
 
-    /// `reset()` drops *all* entries — including bound ones `sweepExpired` skips — so a
+    /// `reset()` drops *bound* entries — including ones `sweepExpired` skips — so a
     /// CallKit-dropped call stops answering `isKnownCall` even though its `disconnected`
-    /// event can no longer find a UUID binding to evict it.
-    func testRemoveAllClearsBoundAndPending() async {
+    /// event can no longer find a UUID binding to evict it. Pending entries survive: their
+    /// CallKit report may still be in flight and be accepted after the reset.
+    func testRemoveBoundClearsBoundKeepsPending() async {
         let registry = CallRegistry()
         let pending = UUID()
         let bound = UUID()
@@ -43,11 +44,11 @@ final class CallRegistryTests: XCTestCase {
         _ = await registry.firstSeen(uuid: bound)
         await registry.bind(call: CallID(0), to: bound)
 
-        await registry.removeAll()
+        await registry.removeBound()
 
         let pendingEntry = await registry.entry(for: pending)
         let boundEntry = await registry.entry(for: bound)
-        XCTAssertNil(pendingEntry)
+        XCTAssertNotNil(pendingEntry)
         XCTAssertNil(boundEntry)
     }
 }

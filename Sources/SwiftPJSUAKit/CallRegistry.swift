@@ -75,12 +75,18 @@ public actor CallRegistry {
         entries[uuid] = nil
     }
 
-    /// Drop every entry — used by ``CallSessionRouter/reset()`` after CallKit has dropped
-    /// all calls: without it the entries outlive the calls and `isKnownCall` keeps
+    /// Drop every *bound* entry — used by ``CallSessionRouter/reset()`` after CallKit has
+    /// dropped all calls: without it the entries outlive the calls and `isKnownCall` keeps
     /// answering true for UUIDs that can never be evicted again (their `disconnected`
     /// events find no UUID binding).
-    public func removeAll() {
-        entries.removeAll()
+    ///
+    /// Pending entries survive deliberately: `reportIncomingCall` suspends at the CallKit
+    /// report, so a reset can interleave between `firstSeen` and CallKit's answer — the
+    /// entry must exist when an accepted call comes back (or `answerCall` can't find it).
+    /// Pending entries whose reports were dropped go stale and are swept by
+    /// ``sweepExpired`` like any unbound report.
+    public func removeBound() {
+        entries = entries.filter { $0.value.call == nil }
     }
 
     /// Evict *pending* entries — those still without an engine ``CallID`` — older than `ttl`.

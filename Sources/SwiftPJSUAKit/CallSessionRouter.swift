@@ -374,7 +374,10 @@ public actor CallSessionRouter {
         uuidByCall.removeAll()
         locallyEnded.removeAll()
         groupAdjacency.removeAll()
-        await registry.removeAll()
+        // Pending entries stay: their CallKit reports may still be in flight and accepted
+        // after the reset — clearing them would strand accepted calls (review: incoming
+        // reports interleave with reset via actor reentrancy).
+        await registry.removeBound()
     }
 
     // MARK: Engine event → CallKit

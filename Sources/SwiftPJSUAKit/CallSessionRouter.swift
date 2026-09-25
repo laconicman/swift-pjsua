@@ -255,6 +255,7 @@ public actor CallSessionRouter {
             await evict(uuid: uuid)
             throw error
         }
+        await registry.markReported(uuid: uuid)
         return uuid
     }
 
@@ -374,10 +375,10 @@ public actor CallSessionRouter {
         uuidByCall.removeAll()
         locallyEnded.removeAll()
         groupAdjacency.removeAll()
-        // Pending entries stay: their CallKit reports may still be in flight and accepted
-        // after the reset — clearing them would strand accepted calls (review: incoming
-        // reports interleave with reset via actor reentrancy).
-        await registry.removeBound()
+        // Only reports still in flight survive: bound entries and resolved reports point
+        // at calls the reset killed, and keeping them would both leak `isKnownCall` and
+        // swallow the re-report when the matching INVITE arrives (review).
+        await registry.removeResolved()
     }
 
     // MARK: Engine event → CallKit

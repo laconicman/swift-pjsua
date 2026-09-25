@@ -197,3 +197,56 @@ final class EventRelayTests: XCTestCase {
                       "call-scoped events are forwarded by the callEvents loop only")
     }
 }
+
+extension EventRelayTests {
+
+    /// `.callReplaced` migrates the replaced leg's CallKit identity onto the new call —
+    /// the INVITE-with-Replaces never passes `.incomingCall`, so without the migration the
+    /// replacement leg has no UUID and the old leg's disconnect would end the visible call.
+    func testCallReplacedMigratesCallKitIdentity() async {
+        let router = makeRouter()
+        let collector = await Collector()
+        await router.setEventObserver { event in collector.observe(event) }
+        let uuid = UUID()
+        let oldCall = CallID(3), newCall = CallID(4)
+        await router.setUUID(uuid, for: oldCall)
+
+        await router.handle(.callReplaced(call: oldCall, newCall: newCall))
+        await router.drainObservers()
+
+        let newUUID = await router.uuid(for: newCall)
+        let oldUUID = await router.uuid(for: oldCall)
+        XCTAssertEqual(newUUID, uuid, "new call inherits the replaced leg's UUID")
+        XCTAssertNil(oldUUID, "old leg unbound — its disconnect is a no-op")
+
+        // And the disconnect that follows leaves the identity alone.
+        await router.handle(.callState(call: oldCall, state: .disconnected,
+                                       sipCallID: nil, lastStatus: 200))
+        let stillBound = await router.uuid(for: newCall)
+        XCTAssertEqual(stillBound, uuid,
+                       "old leg's disconnect must not end the migrated call")
+
+        let observed = await collector.events
+        XCTAssertTrue(observed.contains { if case .callReplaced = $0 { true } else { false } },
+                      "the tap still sees the event")
+    }
+
+    /// `.callTransferStatus` reaches the tap; on an unstarted engine the final-2xx hangup
+    /// is gated by `isRunning`, so driving it here is safe and verifies the no-op path.
+    func testCallTransferStatusReachesObserverWithoutEngine() async {
+        let router = makeRouter()
+        let collector = await Collector()
+        await router.setEventObserver { event in collector.observe(event) }
+
+        await router.handle(.callTransferStatus(call: CallID(0), statusCode: 200,
+                                                statusText: "OK", isFinal: true))
+        await router.drainObservers()
+
+        let observed = await collector.events
+        guard case .callTransferStatus(_, let code, _, let isFinal) = observed.first else {
+            return XCTFail("expected callTransferStatus, got \(String(describing: observed.first))")
+        }
+        XCTAssertEqual(code, 200)
+        XCTAssertTrue(isFinal)
+    }
+}

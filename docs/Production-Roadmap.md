@@ -418,11 +418,14 @@ contract. **PR-b** added the video surface and conference primitives (now shippe
 ### Milestone 2 — Registration robustness & network changes
 - Parse `on_reg_state2` properly (`info.pointee.cbparam.pointee.code`/`.expiration`);
   surface real registration state; handle 401/403, retry/backoff, multiple accounts.
-- **IP/network change handling.** Drive `pjsua_handle_ip_change` (and STUN refresh) from
-  `NWPathMonitor`. Mind the **SRV-vs-A-record** gotcha: some providers (e.g. 1&1) don't
-  publish SRV records, so an SRV-only resolver fails to register — fall back to plain
-  address resolution. (Documented in [libphone](https://github.com/oliverepper/libphone)'s
-  provider notes.)
+- **IP/network change handling** — *engine side shipped*: `PJSUA.handleIPChange()` +
+  the `.ipChangeProgress` event (#17). App-side `NWPathMonitor` → `handleIPChange()`
+  wiring lives in Offhook (signature = status + preferred-route types + bound local
+  addresses; pending-slot pump coalesces flap storms, `.completed` drains it). Still
+  open: STUN refresh, and the **SRV-vs-A-record** gotcha — some providers (e.g. 1&1)
+  don't publish SRV records, so an SRV-only resolver fails to register; fall back to
+  plain address resolution. (Documented in
+  [libphone](https://github.com/oliverepper/libphone)'s provider notes.)
 - TLS (the `swift-pjsip` build uses native Darwin SSL) and SRTP policy.
 
 ### Milestone 3 — Call features

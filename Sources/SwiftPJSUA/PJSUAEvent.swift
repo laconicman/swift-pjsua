@@ -57,4 +57,33 @@ public enum PJSUAEvent: Sendable {
     /// Our call was replaced by an incoming INVITE-with-Replaces (`on_call_replaced`) — the
     /// *transferee* side of an attended transfer. `newCall` is the call that took over.
     case callReplaced(call: CallID, newCall: CallID)
+
+    /// One step of ``PJSUA/handleIPChange()`` (`on_ip_change_progress`). `status` is the
+    /// step's `pj_status_t` (0 = success). Which identifier payload is set depends on
+    /// ``IPChangeOperation``: `transportID` for `.restartListener`, `account` for the
+    /// account steps, `call` alongside it for the two call steps.
+    case ipChangeProgress(operation: IPChangeOperation, status: Int32,
+                          account: AccountID?, call: CallID?, transportID: Int32?)
+}
+
+/// The `pjsua_ip_change_op` step currently being reported by `.ipChangeProgress`.
+public enum IPChangeOperation: Sendable {
+    /// TCP/TLS transports are being forcefully shut down.
+    case shutdownTransport
+    /// A transport listener is restarting (`transportID` payload).
+    case restartListener
+    /// The transport carrying an account's registration is shut down (`account`).
+    case accountShutdownTransport
+    /// The account re-REGISTERed to rewrite its contact (`account`; the SIP code itself
+    /// also surfaces through `.registrationState`).
+    case accountUpdateContact
+    /// An active call is being hung up per the account's `ip_change_cfg` (`account`+`call`).
+    case accountHangupCalls
+    /// An active call is being re-INVITEd/UPDATEd (`account`+`call`).
+    case accountReinviteCalls
+    /// The whole IP-change sequence finished.
+    case completed
+    /// A `pjsua_ip_change_op` this build doesn't know — surfaced rather than dropped or
+    /// misreported as `.completed`.
+    case unknown
 }

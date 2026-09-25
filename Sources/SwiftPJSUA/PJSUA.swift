@@ -265,4 +265,23 @@ public actor PJSUA {
         finishPJSUAEventStreams()
         executor.stop()
     }
+
+    // MARK: Network change
+
+    /// Tell the engine the device's IP/network changed — e.g. an `NWPathMonitor` saw a
+    /// Wi-Fi ↔ cellular handoff (`pjsua_handle_ip_change` with all defaults). Restarts
+    /// transport listeners, forcefully shuts down TCP/TLS transports, then per account:
+    /// re-REGISTERs with the rewritten contact (`allow_contact_rewrite`) and re-INVITEs
+    /// in-progress calls (UPDATE where the peer advertises it).
+    ///
+    /// Progress arrives as ``PJSUAEvent/ipChangeProgress`` ending in `.completed`. Safe to
+    /// call repeatedly — pjsua detects a handling sequence already in progress and skips
+    /// re-entering it. During the sequence pjsua ignores request timeouts
+    /// (`keep_inv_after_tsx_timeout`), so calls survive the flap rather than dying on it.
+    public func handleIPChange() throws {
+        precondition(state == .running, "start() must complete before handleIPChange()")
+        var param = pjsua_ip_change_param()
+        pjsua_ip_change_param_default(&param) // NULL param is a hard assert, not "defaults"
+        try pjsua_handle_ip_change(&param).throwIfFailed()
+    }
 }

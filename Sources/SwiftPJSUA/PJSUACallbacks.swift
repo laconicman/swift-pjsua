@@ -151,6 +151,9 @@ func installPJSUACallbacks(into cfg: inout pjsua_config) {
         pjsuaOnCallTransferStatus(callId, code, text, final, pCont)
     }
     cfg.cb.on_call_replaced = { oldId, newId in pjsuaOnCallReplaced(oldId, newId) }
+    cfg.cb.on_ip_change_progress = { op, status, info in
+        pjsuaOnIPChangeProgress(op, status, info)
+    }
 }
 
 /// Debug sanity check: every callback must arrive on a thread PJLIB has registered.
@@ -393,4 +396,44 @@ private func pjsuaOnCallTransferStatus(_ callId: pjsua_call_id,
 private func pjsuaOnCallReplaced(_ oldCallId: pjsua_call_id, _ newCallId: pjsua_call_id) {
     assertOnRegisteredPJThread()
     emitCall(.callReplaced(call: CallID(oldCallId), newCall: CallID(newCallId)))
+}
+
+/// `on_ip_change_progress` — per-step progress of a `handleIPChange()` sequence. The
+/// `info` union member is read only for the op that fills it; everything lands on the
+/// guaranteed channel (the sequence is rare and lifecycle-relevant — diagnostics want it).
+private func pjsuaOnIPChangeProgress(_ op: pjsua_ip_change_op,
+                                     _ status: pj_status_t,
+                                     _ info: UnsafePointer<pjsua_ip_change_op_info>?) {
+    assertOnRegisteredPJThread()
+    var operation: IPChangeOperation
+    var account: AccountID?
+    var call: CallID?
+    var transportID: Int32?
+    switch op {
+    case PJSUA_IP_CHANGE_OP_SHUTDOWN_TP:
+        operation = .shutdownTransport
+    case PJSUA_IP_CHANGE_OP_RESTART_LIS:
+        operation = .restartListener
+        transportID = info.map { Int32($0.pointee.lis_restart.transport_id) }
+    case PJSUA_IP_CHANGE_OP_ACC_SHUTDOWN_TP:
+        operation = .accountShutdownTransport
+        account = info.map { AccountID($0.pointee.acc_shutdown_tp.acc_id) }
+    case PJSUA_IP_CHANGE_OP_ACC_UPDATE_CONTACT:
+        operation = .accountUpdateContact
+        account = info.map { AccountID($0.pointee.acc_update_contact.acc_id) }
+    case PJSUA_IP_CHANGE_OP_ACC_HANGUP_CALLS:
+        operation = .accountHangupCalls
+        account = info.map { AccountID($0.pointee.acc_hangup_calls.acc_id) }
+        call = info.map { CallID($0.pointee.acc_hangup_calls.call_id) }
+    case PJSUA_IP_CHANGE_OP_ACC_REINVITE_CALLS:
+        operation = .accountReinviteCalls
+        account = info.map { AccountID($0.pointee.acc_reinvite_calls.acc_id) }
+        call = info.map { CallID($0.pointee.acc_reinvite_calls.call_id) }
+    case PJSUA_IP_CHANGE_OP_COMPLETED:
+        operation = .completed
+    default:
+        operation = .unknown
+    }
+    emitCall(.ipChangeProgress(operation: operation, status: Int32(status),
+                               account: account, call: call, transportID: transportID))
 }

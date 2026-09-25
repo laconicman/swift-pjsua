@@ -211,6 +211,33 @@ final class EventRelayTests: XCTestCase {
         XCTAssertTrue(oursKnown)
         XCTAssertFalse(foreignKnown)
     }
+
+    /// A reset landing between CallKit's accept and `markReported` must not leave a stale
+    /// `reported` entry — it would swallow the re-INVITE via `firstSeen` until TTL.
+    func testConcludeAcceptedReportWithStaleEpochDropsEntry() async {
+        let router = makeRouter()
+        let uuid = UUID()
+        await router.seedRegistryEntry(uuid)
+
+        // Simulate reset() having run during the report suspension.
+        let stale = await router.resetEpoch - 1
+        await router.concludeAcceptedReport(uuid: uuid, epoch: stale)
+
+        let known = await router.isKnownCall(uuid)
+        XCTAssertFalse(known)
+    }
+
+    func testConcludeAcceptedReportWithCurrentEpochMarksReported() async {
+        let router = makeRouter()
+        let uuid = UUID()
+        await router.seedRegistryEntry(uuid)
+
+        let epoch = await router.resetEpoch
+        await router.concludeAcceptedReport(uuid: uuid, epoch: epoch)
+
+        let known = await router.isKnownCall(uuid)
+        XCTAssertTrue(known)
+    }
 }
 
 extension EventRelayTests {

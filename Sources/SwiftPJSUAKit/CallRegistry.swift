@@ -93,9 +93,9 @@ public actor CallRegistry {
     ///
     /// Reports still in flight survive deliberately: `reportIncomingCall` suspends at the
     /// CallKit call, so a reset can interleave between `firstSeen` and CallKit's answer —
-    /// the entry must exist when an accepted call comes back (or `answerCall` can't find
-    /// it). An in-flight report that resolves post-reset marks itself ``markReported`` and
-    /// lives on; one whose report was dropped stays unreported and is swept by
+    /// the entry must exist while the report is outstanding. When the answer arrives,
+    /// `concludeAcceptedReport` detects the moved epoch and removes the entry (the reset
+    /// killed that call); a report CallKit never answers stays unreported and is swept by
     /// ``sweepExpired`` like any unbound entry.
     public func removeResolved() {
         entries = entries.filter { !$0.value.reported && $0.value.call == nil }

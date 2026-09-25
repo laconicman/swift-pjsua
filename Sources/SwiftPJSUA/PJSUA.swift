@@ -67,8 +67,11 @@ public actor PJSUA {
         /// pjsip/pjproject#5075).
         public var transports: [TransportConfiguration] = [.init("udp", .udp), .init("tcp", .tcp)]
         public var logLevel: UInt32 = 4
-        /// Verbosity ceiling for ``logSink`` — pjsip's `logging_config.level`, independent of
-        /// ``logLevel`` (which gates console output). pjsip's own default is 5.
+        /// Verbosity ceiling for ``logSink``, independent of ``logLevel`` (which gates
+        /// console output). pjsip's own default is 5. Upstream's `level`/`console_level`
+        /// cannot express two independent ceilings — `cb` only sees console-eligible lines —
+        /// so `start` raises both upstream gates to the max and the per-path ceilings are
+        /// enforced inside the callback.
         public var logSinkLevel: UInt32 = 5
         /// Whether pjsip logs whole SIP messages (`logging_config.msg_logging`, on by default
         /// upstream). This is what makes a "live SIP log" possible — leave on for a debug
@@ -179,44 +182,63 @@ public actor PJSUA {
 
         var log = pjsua_logging_config()
         pjsua_logging_config_default(&log)
-        log.console_level = config.logLevel
         log.msg_logging = pj_bool_t(config.messageLogging)
-        // The sink's verbosity gate is `level`, not `console_level` — independent taps.
-        log.level = config.logSinkLevel
         if config.logSink != nil {
+            // `console_level` gates which lines reach `cb` at all and `level` gates which
+            // reach the writer — so both upstream ceilings get the max of the two requests,
+            // and the independent per-path ceilings live inside `pjsuaOnLog` (which also
+            // re-forwards console-eligible lines to `pj_log_write`, because `cb` *replaces*
+            // console output rather than tapping it).
+            let ceiling = max(config.logLevel, config.logSinkLevel)
+            log.console_level = ceiling
+            log.level = ceiling
+            pjsuaLogConsoleLevel = Int32(config.logLevel)
+            pjsuaLogSinkLevel = Int32(config.logSinkLevel)
             pjsuaLogSink = config.logSink
             log.cb = { level, data, len in pjsuaOnLog(level, data, len) }
+        } else {
+            log.console_level = config.logLevel
         }
 
         var media = pjsua_media_config()
         pjsua_media_config_default(&media)
         media.thread_cnt = 1 // media worker thread; keep >= 1 for the same reason as above.
 
-        try pjsua_init(&cfg, &log, &media).throwIfFailed()
+        do {
+            try pjsua_init(&cfg, &log, &media).throwIfFailed()
 
-        // 3. transport(s) — one per TransportConfiguration, remembered by name so an account can
-        // pin itself to one (`AccountConfiguration.transportName` → `acc_config.transport_id`).
-        // Ports live here, never on the account: pjsua has no per-account port.
-        for transport in config.transports {
-            // Names are the only handle an account has on a transport, so a duplicate would
-            // silently make one of them unreachable. Refuse rather than pick a winner.
-            guard transportIDs[transport.name] == nil else {
-                throw PJSUAUsageError.duplicateTransportName(transport.name)
+            // 3. transport(s) — one per TransportConfiguration, remembered by name so an
+            // account can pin one (`AccountConfiguration.transportName` →
+            // `acc_config.transport_id`). Ports live here, never on the account: pjsua has
+            // no per-account port.
+            for transport in config.transports {
+                // Names are the only handle an account has on a transport, so a duplicate
+                // would silently make one of them unreachable. Refuse rather than pick.
+                guard transportIDs[transport.name] == nil else {
+                    throw PJSUAUsageError.duplicateTransportName(transport.name)
+                }
+                var tcfg = pjsua_transport_config()
+                pjsua_transport_config_default(&tcfg)
+                tcfg.port = transport.port
+                var transportId: pjsua_transport_id = -1 // PJSUA_INVALID_ID
+                try pjsua_transport_create(transport.kind.pjType, &tcfg, &transportId)
+                    .throwIfFailed()
+                transportIDs[transport.name] = transportId
             }
-            var tcfg = pjsua_transport_config()
-            pjsua_transport_config_default(&tcfg)
-            tcfg.port = transport.port
-            var transportId: pjsua_transport_id = -1 // PJSUA_INVALID_ID
-            try pjsua_transport_create(transport.kind.pjType, &tcfg, &transportId).throwIfFailed()
-            transportIDs[transport.name] = transportId
+
+            // Fail-fast is deliberate for a debug engine: if a listener cannot bind,
+            // `start()` throws rather than continuing silently — a missing TCP transport
+            // disables the §18.1.1 upgrade. A production build may prefer best-effort (log
+            // and carry on). See TD-18.
+
+            // 4. go
+            try pjsua_start().throwIfFailed()
+        } catch {
+            // A failed start must not leave the tap installed: `shutdown()` only clears it
+            // on the running path, so a throw here would leak the sink into the next start.
+            pjsuaLogSink = nil
+            throw error
         }
-
-        // Fail-fast is deliberate for a debug engine: if a listener cannot bind, `start()`
-        // throws rather than continuing silently — a missing TCP transport disables the §18.1.1
-        // upgrade. A production build may prefer best-effort (log and carry on). See TD-18.
-
-        // 4. go
-        try pjsua_start().throwIfFailed()
         state = .running
     }
 

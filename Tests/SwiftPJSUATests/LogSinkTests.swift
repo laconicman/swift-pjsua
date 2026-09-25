@@ -33,7 +33,10 @@ final class LogSinkTests: XCTestCase {
     func testOnLogDecodesExactlyLenBytes() {
         let lines = Lines()
         pjsuaLogSink = { level, text in lines.append(level, text) }
-        defer { pjsuaLogSink = nil }
+        // -1 keeps the console-forward half silent — this test has no pjsua running, and
+        // pj_log_write would otherwise echo the line to stdout.
+        pjsuaLogConsoleLevel = -1
+        defer { pjsuaLogSink = nil; pjsuaLogConsoleLevel = 4; pjsuaLogSinkLevel = 5 }
 
         var buffer: [CChar] = Array("partial line".utf8CString) // NUL-terminated storage…
         pjsuaOnLog(3, &buffer, 7)                              // …but only 7 bytes are logged
@@ -42,6 +45,22 @@ final class LogSinkTests: XCTestCase {
 
         pjsuaOnLog(3, nil, 5) // no data pointer — must not call the sink or crash
         XCTAssertEqual(lines.snapshot.count, 1)
+    }
+
+    /// The sink's ceiling is applied *inside* the callback — upstream both gates are raised
+    /// to the max of the two requests, so a line between `logSinkLevel` and the console
+    /// ceiling reaches `cb` and must not reach the sink.
+    func testSinkCeilingAppliedInsideCallback() {
+        let lines = Lines()
+        pjsuaLogSink = { level, text in lines.append(level, text) }
+        pjsuaLogConsoleLevel = -1
+        pjsuaLogSinkLevel = 3
+        defer { pjsuaLogSink = nil; pjsuaLogConsoleLevel = 4; pjsuaLogSinkLevel = 5 }
+
+        var buffer: [CChar] = Array("line".utf8CString)
+        pjsuaOnLog(4, &buffer, 4) // above the sink ceiling — dropped
+        pjsuaOnLog(3, &buffer, 4) // at it — delivered
+        XCTAssertEqual(lines.snapshot.map(\.level), [3])
     }
 
     /// A real engine start produces log lines through the configured sink — end-to-end proof

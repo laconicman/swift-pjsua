@@ -89,6 +89,11 @@ extension PJSUA {
     /// Blind transfer (`pjsua_call_xfer`): sends REFER with `Refer-To: <uri>` instructing the
     /// remote party to call `uri` itself. Progress is reported via ``events`` /
     /// ``callEvents`` as `.callTransferStatus` until the `final` notification.
+    ///
+    /// Lifecycle note: because the engine always installs `on_call_transfer_status`, pjsua's
+    /// built-in "hang up our leg once the transfer succeeds" default does *not* run — the
+    /// final-2xx hangup is a policy owned by `SwiftPJSUAKit.CallSessionRouter`. Raw-engine
+    /// consumers wanting the same semantic hang up `call` themselves on a final 2xx status.
     public func transfer(_ call: CallID, to uri: String) throws {
         precondition(state == .running, "start() must complete before transfer()")
         let status = uri.withPJStr { dest -> pj_status_t in
@@ -102,6 +107,10 @@ extension PJSUA {
     /// call. `requireReplaces: false` suppresses the `Require: replaces` header for peers
     /// that reject it (`PJSUA_XFER_NO_REQUIRE_REPLACES`). Progress arrives as
     /// `.callTransferStatus`; the replaced side surfaces as `.callReplaced`.
+    ///
+    /// Lifecycle note: same as ``transfer(_:to:)`` — the transferor-leg hangup on success is
+    /// router policy (`CallSessionRouter`), not engine default; the installed
+    /// `on_call_transfer_status` callback suppresses pjsua's built-in one.
     public func attendedTransfer(_ call: CallID, replacing replaced: CallID,
                                  requireReplaces: Bool = true) throws {
         precondition(state == .running, "start() must complete before attendedTransfer()")

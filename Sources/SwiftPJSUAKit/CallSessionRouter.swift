@@ -207,6 +207,12 @@ public actor CallSessionRouter {
     /// Whether `uuid` belongs to a call this router reported to (or started through) CallKit.
     /// `CXCallObserver` is system-wide — it also reports other apps' calls — so a UI that
     /// builds controls from observer callbacks needs this check to filter foreign calls out.
+    ///
+    /// Point-in-time answer: for *outgoing* calls, CallKit can announce the UUID to
+    /// `CXCallObserver` before the start-call action reaches the provider delegate — the
+    /// registry cannot know the app's intent that early. A UI should treat UUIDs it
+    /// requested itself as owned without querying, and use this for calls it did not
+    /// request (incoming legs, which are registered before CallKit announces them).
     public func isKnownCall(_ uuid: UUID) async -> Bool {
         await registry.entry(for: uuid) != nil
     }
@@ -368,6 +374,7 @@ public actor CallSessionRouter {
         uuidByCall.removeAll()
         locallyEnded.removeAll()
         groupAdjacency.removeAll()
+        await registry.removeAll()
     }
 
     // MARK: Engine event → CallKit

@@ -75,6 +75,14 @@ public actor CallRegistry {
         entries[uuid] = nil
     }
 
+    /// Drop every entry — used by ``CallSessionRouter/reset()`` after CallKit has dropped
+    /// all calls: without it the entries outlive the calls and `isKnownCall` keeps
+    /// answering true for UUIDs that can never be evicted again (their `disconnected`
+    /// events find no UUID binding).
+    public func removeAll() {
+        entries.removeAll()
+    }
+
     /// Evict *pending* entries — those still without an engine ``CallID`` — older than `ttl`.
     /// Bound (live) calls are never swept here; they are removed on terminal call state via
     /// ``remove(uuid:)``. Called periodically by ``CallSessionRouter``.

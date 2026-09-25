@@ -1,4 +1,5 @@
 import XCTest
+@testable import SwiftPJSUA
 @testable import SwiftPJSUAKit
 
 final class CallRegistryTests: XCTestCase {
@@ -29,5 +30,24 @@ final class CallRegistryTests: XCTestCase {
         await registry.remove(uuid: uuid)
         let entry = await registry.entry(for: uuid)
         XCTAssertNil(entry)
+    }
+
+    /// `reset()` drops *all* entries — including bound ones `sweepExpired` skips — so a
+    /// CallKit-dropped call stops answering `isKnownCall` even though its `disconnected`
+    /// event can no longer find a UUID binding to evict it.
+    func testRemoveAllClearsBoundAndPending() async {
+        let registry = CallRegistry()
+        let pending = UUID()
+        let bound = UUID()
+        _ = await registry.firstSeen(uuid: pending)
+        _ = await registry.firstSeen(uuid: bound)
+        await registry.bind(call: CallID(0), to: bound)
+
+        await registry.removeAll()
+
+        let pendingEntry = await registry.entry(for: pending)
+        let boundEntry = await registry.entry(for: bound)
+        XCTAssertNil(pendingEntry)
+        XCTAssertNil(boundEntry)
     }
 }

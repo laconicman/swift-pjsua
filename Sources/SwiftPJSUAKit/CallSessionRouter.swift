@@ -140,6 +140,10 @@ public actor CallSessionRouter {
     private var consumer: Task<Void, Never>?
     private var telemetryConsumer: Task<Void, Never>?
 
+    /// Bumped by `reset()` so a `reportIncomingCall` suspended inside CallKit can tell the
+    /// provider dropped everything mid-report. Internal (not `private`) for @testable.
+    var resetEpoch = 0
+
     /// Periodic TTL sweep of orphaned *pending* registry entries — a VoIP push reported a call
     /// whose INVITE never arrived. Withdraws the stale ringing CallKit report (see
     /// ``CallRegistry/sweepExpired(olderThan:)``). Runs for the process lifetime alongside
@@ -204,6 +208,19 @@ public actor CallSessionRouter {
         eventObserver = observer
     }
 
+    /// Whether `uuid` belongs to a call this router reported to (or started through) CallKit.
+    /// `CXCallObserver` is system-wide — it also reports other apps' calls — so a UI that
+    /// builds controls from observer callbacks needs this check to filter foreign calls out.
+    ///
+    /// Point-in-time answer: for *outgoing* calls, CallKit can announce the UUID to
+    /// `CXCallObserver` before the start-call action reaches the provider delegate — the
+    /// registry cannot know the app's intent that early. A UI should treat UUIDs it
+    /// requested itself as owned without querying, and use this for calls it did not
+    /// request (incoming legs, which are registered before CallKit announces them).
+    public func isKnownCall(_ uuid: UUID) async -> Bool {
+        await registry.entry(for: uuid) != nil
+    }
+
     // MARK: Incoming report (push or socket)
 
     /// Report a new incoming call to CallKit, deduplicated via ``CallIdentity`` / ``CallRegistry``.
@@ -235,6 +252,7 @@ public actor CallSessionRouter {
         // bridge in setGroup(_:) (§7.1 / §10).
         update.supportsGrouping = true
         update.supportsUngrouping = true
+        let epoch = resetEpoch
         do {
             try await provider.reportNewIncomingCall(with: uuid, update: update)
         } catch {
@@ -242,7 +260,21 @@ public actor CallSessionRouter {
             await evict(uuid: uuid)
             throw error
         }
+        await concludeAcceptedReport(uuid: uuid, epoch: epoch)
         return uuid
+    }
+
+    /// Finish a CallKit-accepted report. If `reset()` interleaved while CallKit was
+    /// answering (`resetEpoch` moved), the call is already dead on both sides — remove
+    /// the entry instead of marking it, or it would sit `reported` until TTL while
+    /// `firstSeen` swallows the re-INVITE that should re-ring.
+    /// Internal for the same @testable reason as `handle(_:)`.
+    func concludeAcceptedReport(uuid: UUID, epoch: Int) async {
+        if epoch == resetEpoch {
+            await registry.markReported(uuid: uuid)
+        } else {
+            await registry.remove(uuid: uuid)
+        }
     }
 
     // MARK: CXProviderDelegate forwarding (called by CallKitController)
@@ -355,12 +387,17 @@ public actor CallSessionRouter {
 
     /// CallKit dropped all calls (e.g. crash recovery). Tear down engine calls and clear state.
     func reset() async {
+        resetEpoch += 1
         await engine.hangupAll()
         for action in pending.values { action.action.fail() }
         pending.removeAll()
         uuidByCall.removeAll()
         locallyEnded.removeAll()
         groupAdjacency.removeAll()
+        // Only reports still in flight survive: bound entries and resolved reports point
+        // at calls the reset killed, and keeping them would both leak `isKnownCall` and
+        // swallow the re-report when the matching INVITE arrives (review).
+        await registry.removeResolved()
     }
 
     // MARK: Engine event → CallKit
@@ -370,6 +407,10 @@ public actor CallSessionRouter {
     /// (which needs CallKit to accept a report).
     func uuid(for call: CallID) -> UUID? { uuidByCall[call] }
     func setUUID(_ uuid: UUID, for call: CallID) { uuidByCall[call] = uuid }
+
+    /// @testable seam — `registry` is private and `reportIncomingCall` can't run in a
+    /// tool-hosted test (CallKit won't accept the report).
+    func seedRegistryEntry(_ uuid: UUID) async { _ = await registry.firstSeen(uuid: uuid) }
 
     /// Internal (not `private`) so tests can drive the handlers directly via `@testable` —
     /// the streams themselves can't be injected without a running engine.

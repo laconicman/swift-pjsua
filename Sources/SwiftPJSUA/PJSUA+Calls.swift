@@ -37,8 +37,10 @@ extension PJSUA {
         try pjsua_call_hangup(call.raw, statusCode, nil, nil).throwIfFailed()
     }
 
-    /// Hang up every active call.
+    /// Hang up every active call. A no-op unless the engine is running — pre-start and
+    /// post-shutdown there are no calls, and pjsua asserts on the bare call anyway.
     public func hangupAll() {
+        guard state == .running else { return }
         pjsua_call_hangup_all()
     }
 

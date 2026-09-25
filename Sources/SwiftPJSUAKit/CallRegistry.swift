@@ -18,15 +18,20 @@ public actor CallRegistry {
         public var uuid: UUID
         public var sipCallID: String?
         public var call: CallID?
+        /// Set once `reportNewIncomingCall` has returned — distinguishes a report still in
+        /// flight (CallKit may still accept it) from one resolved (CallKit owns the call;
+        /// a provider reset drops it and the entry must not block re-report).
+        public var reported: Bool
         /// When the entry was first created. Used only to evict orphaned *pending* entries; not
         /// refreshed when later identifiers are merged.
         public var createdAt: Date
 
         public init(uuid: UUID, sipCallID: String? = nil, call: CallID? = nil,
-                    createdAt: Date = Date()) {
+                    reported: Bool = false, createdAt: Date = Date()) {
             self.uuid = uuid
             self.sipCallID = sipCallID
             self.call = call
+            self.reported = reported
             self.createdAt = createdAt
         }
     }
@@ -73,6 +78,27 @@ public actor CallRegistry {
 
     public func remove(uuid: UUID) {
         entries[uuid] = nil
+    }
+
+    /// Mark `uuid`'s CallKit report as resolved — see ``Entry/reported``.
+    public func markReported(uuid: UUID) {
+        entries[uuid]?.reported = true
+    }
+
+    /// Drop every entry pointing at a call CallKit could have dropped — used by
+    /// ``CallSessionRouter/reset()``: bound entries and resolved reports both refer to
+    /// calls the reset killed, and keeping them would (a) leave `isKnownCall` answering
+    /// true forever for dead calls, and (b) make `firstSeen` swallow the re-report when
+    /// the matching INVITE arrives later.
+    ///
+    /// Reports still in flight survive deliberately: `reportIncomingCall` suspends at the
+    /// CallKit call, so a reset can interleave between `firstSeen` and CallKit's answer —
+    /// the entry must exist while the report is outstanding. When the answer arrives,
+    /// `concludeAcceptedReport` detects the moved epoch and removes the entry (the reset
+    /// killed that call); a report CallKit never answers stays unreported and is swept by
+    /// ``sweepExpired`` like any unbound entry.
+    public func removeResolved() {
+        entries = entries.filter { !$0.value.reported && $0.value.call == nil }
     }
 
     /// Evict *pending* entries — those still without an engine ``CallID`` — older than `ttl`.

@@ -365,6 +365,12 @@ public actor CallSessionRouter {
 
     // MARK: Engine event → CallKit
 
+    /// @testable seams for the `.callReplaced` identity migration — the map itself stays
+    /// private; tests seed and read it through these rather than via `reportIncomingCall`
+    /// (which needs CallKit to accept a report).
+    func uuid(for call: CallID) -> UUID? { uuidByCall[call] }
+    func setUUID(_ uuid: UUID, for call: CallID) { uuidByCall[call] = uuid }
+
     /// Internal (not `private`) so tests can drive the handlers directly via `@testable` —
     /// the streams themselves can't be injected without a running engine.
     func handle(_ event: PJSUAEvent) async {
@@ -402,12 +408,34 @@ public actor CallSessionRouter {
             await relayRegistration(account: account, active: active,
                                     statusCode: statusCode, expiration: expiration)
 
-        case .streamDestroyed, .callMediaEvent, .callTransferStatus, .callReplaced:
-            // No CallKit mapping either, and deliberately not invented: none of these need a
-            // CallKit action — media errors and transfer progress are diagnostic, and the
-            // replaced leg ends via its normal `.disconnected` callState. Already forwarded
-            // to the eventObserver above — statistics, media-failure policy, and transfer UI
-            // are the app's (offhook OH-10).
+        case let .callTransferStatus(call, statusCode, _, isFinal):
+            // Installing on_call_transfer_status disables pjsua's *automatic* transferor
+            // hangup (pjsua_call.c: without the callback, a final 2xx NOTIFY disconnects the
+            // REFER'd leg — RFC 5589 §7.5 semantics). The router is the lifecycle owner, so
+            // it restores that policy here: a successful final NOTIFY ends our leg; anything
+            // else keeps it alive.
+            if isFinal && (200..<300).contains(statusCode), await engine.isRunning {
+                try? await engine.hangup(call)
+            }
+
+        case let .callReplaced(call, newCall):
+            // Transferee side: the INVITE-with-Replaces created `newCall` and pjsua answers
+            // it itself — it never passes through `.incomingCall`, so it never gets a CallKit
+            // identity on its own. It *is* the same conversation, so migrate the replaced
+            // leg's identity: pjsua emits this before hanging up the old leg, and clearing
+            // `uuidByCall[call]` makes that disconnect a no-op instead of ending the CallKit
+            // call the new leg just inherited.
+            if let uuid = uuidByCall[call] {
+                uuidByCall[call] = nil
+                uuidByCall[newCall] = uuid
+                await registry.bind(call: newCall, to: uuid)
+            }
+
+        case .streamDestroyed, .callMediaEvent:
+            // No CallKit mapping either, and deliberately not invented: neither event ends a
+            // call, and CallKit has no vocabulary for "still connected, but the media is dead".
+            // Already forwarded to the eventObserver above — end-of-stream statistics and
+            // media-failure policy are the app's (offhook OH-10).
             break
         }
     }

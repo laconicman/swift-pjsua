@@ -41,6 +41,11 @@ public actor PJSUA {
     enum State { case idle, running, stopped }
     private(set) var state: State = .idle
 
+    /// Whether ``start(_:)`` has completed and ``shutdown()`` hasn't run — the only state in
+    /// which call/account APIs are valid. Cross-module consumers (SwiftPJSUAKit's router)
+    /// gate engine calls on it rather than trusting event ordering at shutdown boundaries.
+    public var isRunning: Bool { state == .running }
+
     /// Parameters of accounts added via ``addAccount(_:credentials:)``, kept so a silent-push
     /// re-REGISTER can re-apply the fields we own on top of pjsua's live config. See
     /// `PJSUA+Accounts.swift`.

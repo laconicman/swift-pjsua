@@ -52,6 +52,43 @@ import PJSIP
 private nonisolated(unsafe) var pjsuaEventSink: AsyncStream<PJSUAEvent>.Continuation?
 private nonisolated(unsafe) var pjsuaCallEventSink: AsyncStream<PJSUAEvent>.Continuation?
 
+/// Process-global sink for pjsip's own log lines (`pjsua_logging_config.cb`). Same
+/// `nonisolated(unsafe)` invariant as the event sinks, with a narrower window: written once
+/// in `PJSUA.start(_:)` before `pjsua_init` can produce a line, cleared in `shutdown` after
+/// `pjsua_destroy` has stopped the threads that would call it. Called from arbitrary pjsip
+/// threads at console volume — the callback does as little as possible before yielding to
+/// the sink.
+nonisolated(unsafe) var pjsuaLogSink: (@Sendable (Int32, String) -> Void)?
+
+/// The two per-path ceilings the app asked for, retained for `pjsuaOnLog` — see below.
+nonisolated(unsafe) var pjsuaLogConsoleLevel: Int32 = 4
+nonisolated(unsafe) var pjsuaLogSinkLevel: Int32 = 5
+
+/// `pjsua_logging_config.cb` — fired on whichever pjsip thread emitted the line.
+///
+/// Two behaviours upstream hides in `log_writer` (pjsua_core.c):
+/// * **`cb` replaces console output, it does not tap it** — the writer calls `cb` *instead
+///   of* `pj_log_write` for every console-eligible line. So this callback re-forwards lines
+///   at or below the app's requested console level to `pj_log_write` (never `pj_log`, which
+///   would recurse back through this callback).
+/// * **`console_level` gates what reaches `cb` at all, and `level` gates what reaches the
+///   writer.** `PJSUA.start` therefore sets both upstream ceilings to the maximum of the
+///   app's two requested levels, and the independent per-path ceilings live here.
+///
+/// `data` is NOT NUL-terminated; `len` is authoritative.
+func pjsuaOnLog(_ level: Int32, _ data: UnsafePointer<CChar>?, _ len: Int32) {
+    guard let data, len > 0 else { return }
+    if level <= pjsuaLogConsoleLevel {
+        pj_log_write(level, data, len)
+    }
+    if let sink = pjsuaLogSink, level <= pjsuaLogSinkLevel {
+        let text = String(decoding: UnsafeRawBufferPointer(start: UnsafeRawPointer(data),
+                                                           count: Int(len)),
+                          as: UTF8.self)
+        sink(level, text)
+    }
+}
+
 /// Create the two event streams and install their continuations as the process-global
 /// sinks. Called once from `PJSUA.init` before anything can start delivering callbacks.
 ///

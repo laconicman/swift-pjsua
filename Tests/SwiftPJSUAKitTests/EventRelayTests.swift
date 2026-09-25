@@ -227,6 +227,22 @@ final class EventRelayTests: XCTestCase {
         XCTAssertFalse(known)
     }
 
+    /// The real interleave: `reset()` runs between `firstSeen` (seeded) and the report's
+    /// conclusion — `removeResolved` retains the in-flight entry, but the moved epoch
+    /// drops it at `concludeAcceptedReport`.
+    func testSuspendedReportAcrossRealResetIsDropped() async {
+        let router = makeRouter()
+        let uuid = UUID()
+        await router.seedRegistryEntry(uuid)
+
+        let epoch = await router.resetEpoch
+        await router.reset()
+        await router.concludeAcceptedReport(uuid: uuid, epoch: epoch)
+
+        let known = await router.isKnownCall(uuid)
+        XCTAssertFalse(known)
+    }
+
     func testConcludeAcceptedReportWithCurrentEpochMarksReported() async {
         let router = makeRouter()
         let uuid = UUID()

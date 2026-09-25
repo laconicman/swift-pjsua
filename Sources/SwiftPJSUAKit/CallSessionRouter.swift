@@ -204,6 +204,13 @@ public actor CallSessionRouter {
         eventObserver = observer
     }
 
+    /// Whether `uuid` belongs to a call this router reported to (or started through) CallKit.
+    /// `CXCallObserver` is system-wide — it also reports other apps' calls — so a UI that
+    /// builds controls from observer callbacks needs this check to filter foreign calls out.
+    public func isKnownCall(_ uuid: UUID) async -> Bool {
+        await registry.entry(for: uuid) != nil
+    }
+
     // MARK: Incoming report (push or socket)
 
     /// Report a new incoming call to CallKit, deduplicated via ``CallIdentity`` / ``CallRegistry``.
@@ -370,6 +377,10 @@ public actor CallSessionRouter {
     /// (which needs CallKit to accept a report).
     func uuid(for call: CallID) -> UUID? { uuidByCall[call] }
     func setUUID(_ uuid: UUID, for call: CallID) { uuidByCall[call] = uuid }
+
+    /// @testable seam — `registry` is private and `reportIncomingCall` can't run in a
+    /// tool-hosted test (CallKit won't accept the report).
+    func seedRegistryEntry(_ uuid: UUID) async { _ = await registry.firstSeen(uuid: uuid) }
 
     /// Internal (not `private`) so tests can drive the handlers directly via `@testable` —
     /// the streams themselves can't be injected without a running engine.

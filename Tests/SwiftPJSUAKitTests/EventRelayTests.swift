@@ -196,6 +196,21 @@ final class EventRelayTests: XCTestCase {
         XCTAssertTrue(observed.isEmpty,
                       "call-scoped events are forwarded by the callEvents loop only")
     }
+
+    /// `CXCallObserver` is system-wide, so apps filter through `isKnownCall`: true only for
+    /// UUIDs the registry has seen (ours), false for anything else (another app's call).
+    func testIsKnownCallDistinguishesRegistryEntries() async {
+        let router = makeRouter()
+        let ours = UUID()
+        let foreign = UUID()
+
+        await router.seedRegistryEntry(ours)
+
+        let oursKnown = await router.isKnownCall(ours)
+        let foreignKnown = await router.isKnownCall(foreign)
+        XCTAssertTrue(oursKnown)
+        XCTAssertFalse(foreignKnown)
+    }
 }
 
 extension EventRelayTests {

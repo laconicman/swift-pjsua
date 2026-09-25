@@ -192,12 +192,16 @@ public actor PJSUA {
             let ceiling = max(config.logLevel, config.logSinkLevel)
             log.console_level = ceiling
             log.level = ceiling
-            pjsuaLogConsoleLevel = Int32(config.logLevel)
-            pjsuaLogSinkLevel = Int32(config.logSinkLevel)
+            pjsuaLogConsoleLevel = Int32(clamping: config.logLevel)
+            pjsuaLogSinkLevel = Int32(clamping: config.logSinkLevel)
             pjsuaLogSink = config.logSink
             log.cb = { level, data, len in pjsuaOnLog(level, data, len) }
         } else {
             log.console_level = config.logLevel
+            // `level` gates what reaches the writer at all — leave it at pjsip's 5 and a
+            // console level above 5 would silently see nothing. Keep the upstream filter
+            // at least as permissive as the most verbose requested output.
+            log.level = max(config.logLevel, config.logSinkLevel)
         }
 
         var media = pjsua_media_config()

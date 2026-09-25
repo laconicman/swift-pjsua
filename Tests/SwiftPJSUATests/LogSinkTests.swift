@@ -5,11 +5,11 @@ import XCTest
 /// `Configuration.logSink` — the app-facing tap on pjsip's own log (`pjsua_logging_config.cb`).
 ///
 /// Two levels of test, because the parts fail differently:
-/// * `pjsuaOnLog` itself — the C-shim bridge, where the interesting contract is that `data`
-///   is **not** NUL-terminated and `len` is authoritative (a naive `String(cString:)` would
-///   read past the buffer).
-/// * The plumbing — a real `PJSUA.start()` with a sink installed must produce lines, and the
-///   sink's verbosity ceiling is `logging_config.level`, not `console_level`.
+/// * `pjsuaOnLog` itself — the C-shim bridge, where the interesting contracts are that
+///   `data` is **not** NUL-terminated (`len` is authoritative) and that the two per-path
+///   ceilings are enforced *inside* the callback (upstream, both gates are raised to the
+///   max of the requests — `cb` would otherwise only see console-eligible lines).
+/// * The plumbing — a real `PJSUA.start()` with a sink installed must produce lines.
 final class LogSinkTests: XCTestCase {
 
     /// Sendable collector for lines arriving on arbitrary pjsip threads.

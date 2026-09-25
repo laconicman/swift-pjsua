@@ -83,4 +83,29 @@ extension PJSUA {
         }
         try status.throwIfFailed()
     }
+
+    // MARK: Transfer
+
+    /// Blind transfer (`pjsua_call_xfer`): sends REFER with `Refer-To: <uri>` instructing the
+    /// remote party to call `uri` itself. Progress is reported via ``events`` /
+    /// ``callEvents`` as `.callTransferStatus` until the `final` notification.
+    public func transfer(_ call: CallID, to uri: String) throws {
+        precondition(state == .running, "start() must complete before transfer()")
+        let status = uri.withPJStr { dest -> pj_status_t in
+            pjsua_call_xfer(call.raw, &dest, nil)
+        }
+        try status.throwIfFailed()
+    }
+
+    /// Attended transfer (`pjsua_call_xfer_replaces`): sends REFER whose `Refer-To` carries a
+    /// `Replaces` of `replaced`'s dialog, so the REFER recipient's new INVITE replaces that
+    /// call. `requireReplaces: false` suppresses the `Require: replaces` header for peers
+    /// that reject it (`PJSUA_XFER_NO_REQUIRE_REPLACES`). Progress arrives as
+    /// `.callTransferStatus`; the replaced side surfaces as `.callReplaced`.
+    public func attendedTransfer(_ call: CallID, replacing replaced: CallID,
+                                 requireReplaces: Bool = true) throws {
+        precondition(state == .running, "start() must complete before attendedTransfer()")
+        let options: UInt32 = requireReplaces ? 0 : UInt32(PJSUA_XFER_NO_REQUIRE_REPLACES)
+        try pjsua_call_xfer_replaces(call.raw, replaced.raw, options, nil).throwIfFailed()
+    }
 }

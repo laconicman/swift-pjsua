@@ -402,11 +402,12 @@ public actor CallSessionRouter {
             await relayRegistration(account: account, active: active,
                                     statusCode: statusCode, expiration: expiration)
 
-        case .streamDestroyed, .callMediaEvent:
-            // No CallKit mapping either, and deliberately not invented: neither event ends a
-            // call, and CallKit has no vocabulary for "still connected, but the media is dead".
-            // Already forwarded to the eventObserver above — end-of-stream statistics and
-            // media-failure policy are the app's (offhook OH-10).
+        case .streamDestroyed, .callMediaEvent, .callTransferStatus, .callReplaced:
+            // No CallKit mapping either, and deliberately not invented: none of these need a
+            // CallKit action — media errors and transfer progress are diagnostic, and the
+            // replaced leg ends via its normal `.disconnected` callState. Already forwarded
+            // to the eventObserver above — statistics, media-failure policy, and transfer UI
+            // are the app's (offhook OH-10).
             break
         }
     }

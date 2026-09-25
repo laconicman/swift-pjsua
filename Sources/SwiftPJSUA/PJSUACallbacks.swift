@@ -110,6 +110,10 @@ func installPJSUACallbacks(into cfg: inout pjsua_config) {
     cfg.cb.on_reg_state2       = { acc, info     in pjsuaOnRegState2(acc, info) }
     cfg.cb.on_stream_destroyed = { callId, strm, idx in pjsuaOnStreamDestroyed(callId, strm, idx) }
     cfg.cb.on_call_media_event = { callId, medIdx, ev in pjsuaOnCallMediaEvent(callId, medIdx, ev) }
+    cfg.cb.on_call_transfer_status = { callId, code, text, final, pCont in
+        pjsuaOnCallTransferStatus(callId, code, text, final, pCont)
+    }
+    cfg.cb.on_call_replaced = { oldId, newId in pjsuaOnCallReplaced(oldId, newId) }
 }
 
 /// Debug sanity check: every callback must arrive on a thread PJLIB has registered.
@@ -327,4 +331,29 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     } else {
         emitCall(event)
     }
+}
+
+/// `on_call_transfer_status` — REFER progress on the *transferor* leg. `pCont` stays
+/// `PJ_TRUE` so the NOTIFY subscription reports through `final`; the app decides what to
+/// do with the stream (it can't reach back into this callback anyway).
+private func pjsuaOnCallTransferStatus(_ callId: pjsua_call_id,
+                                       _ stCode: Int32,
+                                       _ stText: UnsafePointer<pj_str_t>?,
+                                       _ final: pj_bool_t,
+                                       _ pCont: UnsafeMutablePointer<pj_bool_t>?) {
+    assertOnRegisteredPJThread()
+    pCont?.pointee = true.pjBool
+    emitCall(.callTransferStatus(
+        call: CallID(callId),
+        statusCode: stCode,
+        statusText: stText?.pointee.string ?? "",
+        isFinal: final != 0
+    ))
+}
+
+/// `on_call_replaced` — the *transferee* side: an incoming INVITE-with-Replaces took over
+/// `old_call_id`; `new_call_id` is the call that replaced it (pjsua answers it itself).
+private func pjsuaOnCallReplaced(_ oldCallId: pjsua_call_id, _ newCallId: pjsua_call_id) {
+    assertOnRegisteredPJThread()
+    emitCall(.callReplaced(call: CallID(oldCallId), newCall: CallID(newCallId)))
 }

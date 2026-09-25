@@ -48,4 +48,13 @@ public enum PJSUAEvent: Sendable {
     /// A `pjmedia_event` that pjsua forwarded to the application **without acting on it**. The
     /// call is unaffected — see ``CallMediaEvent`` and `docs/Call-Termination-Paths.md` §3.
     case callMediaEvent(call: CallID, mediaIndex: Int, event: CallMediaEvent)
+
+    /// Progress of a REFER transfer we initiated (`on_call_transfer_status`): `statusCode`/
+    /// `statusText` are the transfer NOTIFY status (e.g. 200 once the REFER recipient's
+    /// INVITE succeeded), `isFinal` marks the last notification for this transfer.
+    case callTransferStatus(call: CallID, statusCode: Int32, statusText: String, isFinal: Bool)
+
+    /// Our call was replaced by an incoming INVITE-with-Replaces (`on_call_replaced`) — the
+    /// *transferee* side of an attended transfer. `newCall` is the call that took over.
+    case callReplaced(call: CallID, newCall: CallID)
 }

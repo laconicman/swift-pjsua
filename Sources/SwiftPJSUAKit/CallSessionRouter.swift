@@ -437,6 +437,12 @@ public actor CallSessionRouter {
             // Already forwarded to the eventObserver above — end-of-stream statistics and
             // media-failure policy are the app's (offhook OH-10).
             break
+
+        case .ipChangeProgress:
+            // Progress of handleIPChange() — informational for the app (diagnostics);
+            // calls re-INVITE transparently, hangups arrive as normal .disconnected
+            // events, and CallKit never learns an IP changed.
+            break
         }
     }
 

@@ -154,7 +154,8 @@ public actor CallSessionRouter {
     /// orphaned push is withdrawn within roughly one TTL of arriving.
     private static let sweepInterval: Duration = .seconds(15)
 
-    private static let logger = Logger(subsystem: "SwiftPJSUAKit", category: "CallSessionRouter")
+    private static let logger = Logger(subsystem: "io.github.laconicman.SwiftPJSUAKit",
+                                       category: "CallSessionRouter")
 
     public init(engine: PJSUA, provider: CXProvider, registry: CallRegistry = CallRegistry()) {
         self.engine = engine

@@ -21,7 +21,8 @@ import SwiftPJSUA
 ///   Pushing background updates to your App
 ///   (<https://developer.apple.com/documentation/usernotifications/pushing-background-updates-to-your-app>).
 public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
-    private static let logger = Logger(subsystem: "SwiftPJSUAKit", category: "VoIPPushHandler")
+    private static let logger = Logger(subsystem: "io.github.laconicman.SwiftPJSUAKit",
+                                       category: "VoIPPushHandler")
 
     private let engine: PJSUA
     private let callKit: CallKitController

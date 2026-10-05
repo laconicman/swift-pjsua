@@ -12,9 +12,9 @@ import SwiftPJSUA
 ///   is forwarded to ``handleSilentPush(_:account:updatingPush:)`` to re-REGISTER with updated
 ///   push parameters (``PJSUA/reRegister(_:updatingPush:)``).
 ///
-/// - Important: **Skeleton.** The payload schemas (`call_uuid` / `sip_call_id` / `from` for VoIP;
-///   `action == "reregister"` for silent) are placeholders to be matched to the real server
-///   contract, and the app still owns the `PKPushRegistry` instance and its registration.
+/// The VoIP payload contract is Flexisip's (see ``VoIPPushPayload``). The silent-push schema
+/// (`action == "reregister"`) is still a placeholder to be matched to a real server, and the app
+/// owns the `PKPushRegistry` instance and its registration.
 ///
 /// - SeeAlso: Responding to VoIP Notifications from PushKit
 ///   (<https://developer.apple.com/documentation/PushKit/responding-to-voip-notifications-from-pushkit>);
@@ -59,13 +59,11 @@ public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
                              for type: PKPushType) async {
         guard type == .voIP else { return }
 
-        let payloadDict = payload.dictionaryPayload
-        let serverUUID = (payloadDict["call_uuid"] as? String).flatMap(UUID.init(uuidString:))
-        let sipCallID = payloadDict["sip_call_id"] as? String
-        let handle = (payloadDict["from"] as? String) ?? "Unknown"
+        let push = VoIPPushPayload(payload.dictionaryPayload)
 
         do {
-            try await callKit.reportIncomingCall(serverUUID: serverUUID, sipCallID: sipCallID, handle: handle)
+            try await callKit.reportIncomingCall(serverUUID: push.serverUUID, sipCallID: push.sipCallID,
+                                                 handle: push.handle)
         } catch {
             // PushKit's contract is satisfied — reportNewIncomingCall ran before this returns. The
             // system declined to ring (blocked caller, DND), which is its prerogative; nothing for

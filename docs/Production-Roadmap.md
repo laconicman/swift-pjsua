@@ -461,7 +461,10 @@ contract. **PR-b** added the video surface and conference primitives (now shippe
 - **Ergonomics via codegen:** use [`swift-pjsip-gen`](https://github.com/laconicman/swift-pjsip-gen)
   to generate typed facades and `CustomStringConvertible` for the pjsua structs — this is the
   pjsua1 answer to "PJSUA2 automates more."
-- **Logging:** route PJSIP logs to OSLog (a log callback or generated helper); the
+- **Logging:** the engine exposes pjsip's log through `PJSUA.Configuration.logSink` (the
+  log callback) and stops there. Routing those lines to OSLog, mapping pjsip levels to log types,
+  choosing privacy and any file are the host app's policy, so the engine has no `Logger` of its
+  own. The Kit logs its own decisions under `io.github.laconicman.SwiftPJSUAKit`. The
   `#fileID`/`#line` timer wrapper is in `PJ+ScheduleTimer.swift`.
 - **Privacy manifest:** PJSIP touches a required-reason API (system boot time for its
   timers); declare it in the **app's** `PrivacyInfo.xcprivacy` (the binary can't carry one).

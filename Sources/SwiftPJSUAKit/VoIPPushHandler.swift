@@ -62,13 +62,12 @@ public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
 
         let push = VoIPPushPayload(payload.dictionaryPayload)
         // The Call-ID stays private: what a library logs in public is the host app's call.
-        Self.logger.notice("""
-            VoIP push: call-id \(push.sipCallID ?? "none", privacy: .private(mask: .hash)), \
-            server UUID \(push.serverUUID == nil ? "absent" : "present", privacy: .public)
-            """)
+        Self.logger.notice("VoIP push: call-id \(push.sipCallID ?? "none", privacy: .private(mask: .hash))")
 
         do {
-            let uuid = try await callKit.reportIncomingCall(serverUUID: push.serverUUID,
+            // No server UUID: the push and the INVITE both derive the UUID from the Call-ID, which
+            // is what keeps them one call (Tech-Debt TD-30).
+            let uuid = try await callKit.reportIncomingCall(serverUUID: nil,
                                                             sipCallID: push.sipCallID,
                                                             handle: push.handle)
             Self.logger.notice("VoIP push reported to CallKit as \(uuid, privacy: .public)")

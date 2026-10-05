@@ -13,11 +13,11 @@ import Foundation
 ///
 /// `aps.uuid` is the **device's** instance ID, not a call identifier, so it is never used as the
 /// CallKit UUID. `from-uri` and `display-name` are empty unless the server sets
-/// `module::PushNotification/display-from-uri=true`. The keys of the earlier placeholder schema
-/// (`call_uuid`, `sip_call_id`, `from`) are read as a fallback.
+/// `module::PushNotification/display-from-uri=true`. The earlier placeholder schema's
+/// `sip_call_id` and `from` are read as a fallback. Its `call_uuid` is not read: the INVITE that
+/// follows has no server UUID, so it would get the Call-ID's UUID instead and ring a second time
+/// (Tech-Debt TD-30).
 struct VoIPPushPayload {
-    /// A call UUID chosen by the server, when the payload carries one (`call_uuid`).
-    var serverUUID: UUID?
     /// The INVITE's `Call-ID`: Flexisip's `aps.call-id`, else `sip_call_id`.
     var sipCallID: String?
     /// Who is calling: `display-name`, else `from-uri`, else `from`, else `"Unknown"`.
@@ -28,7 +28,6 @@ struct VoIPPushPayload {
         func text(_ value: Any?) -> String? {
             (value as? String).flatMap { $0.isEmpty ? nil : $0 }
         }
-        serverUUID = text(payload["call_uuid"]).flatMap(UUID.init(uuidString:))
         sipCallID = text(aps?["call-id"]) ?? text(payload["sip_call_id"])
         handle = text(payload["display-name"]) ?? text(payload["from-uri"])
             ?? text(payload["from"]) ?? "Unknown"

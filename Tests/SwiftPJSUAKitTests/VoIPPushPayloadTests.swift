@@ -15,7 +15,6 @@ final class VoIPPushPayloadTests: XCTestCase {
         let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [AnyHashable: Any])
         let push = VoIPPushPayload(payload)
         XCTAssertEqual(push.sipCallID, "1-97362@192.168.64.1")
-        XCTAssertNil(push.serverUUID, "aps.uuid is the device's instance ID, never the call's UUID")
         XCTAssertEqual(push.handle, "Alice")
     }
 
@@ -32,11 +31,10 @@ final class VoIPPushPayloadTests: XCTestCase {
         XCTAssertEqual(push.handle, "sip:bob@example.com")
     }
 
+    /// `call_uuid` is ignored (TD-30): the call is identified by its Call-ID alone.
     func testPlaceholderKeysStillRead() {
-        let uuid = UUID()
-        let push = VoIPPushPayload(["call_uuid": uuid.uuidString, "sip_call_id": "c2",
+        let push = VoIPPushPayload(["call_uuid": UUID().uuidString, "sip_call_id": "c2",
                                     "from": "sip:carol@example.com"])
-        XCTAssertEqual(push.serverUUID, uuid)
         XCTAssertEqual(push.sipCallID, "c2")
         XCTAssertEqual(push.handle, "sip:carol@example.com")
     }

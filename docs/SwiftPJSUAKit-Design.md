@@ -304,7 +304,8 @@ No new sign-off here; this is wiring `VoIPPushHandler`'s silent branch to `reReg
 
 Already scaffolded (`CallIdentity` + `CallRegistry`); this milestone makes it load-bearing:
 - One CallKit UUID per logical call. Resolution: server-supplied UUID in push → else **UUIDv5 from
-  SIP `Call-ID`** (CryptoKit) → else random. The INVITE over the socket carries the same `Call-ID`,
+  SIP `Call-ID`** (CryptoKit) → else random. No push path supplies a server UUID today: the
+  INVITE would not find it and would ring a second time (Tech-Debt TD-30). The INVITE over the socket carries the same `Call-ID`,
   so both paths compute the same UUID. PJSIP does **not** correlate push↔INVITE — the app must
   (confirmed by the official ipjsua `call_map` pattern).
 - `CallRegistry.firstSeen(uuid:)` returns `true` once; the second arrival just binds its `CallID` /

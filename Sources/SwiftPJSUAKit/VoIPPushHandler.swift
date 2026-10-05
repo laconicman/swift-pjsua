@@ -61,10 +61,17 @@ public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
         guard type == .voIP else { return }
 
         let push = VoIPPushPayload(payload.dictionaryPayload)
+        // The Call-ID stays private: what a library logs in public is the host app's call.
+        Self.logger.notice("""
+            VoIP push: call-id \(push.sipCallID ?? "none", privacy: .private(mask: .hash)), \
+            server UUID \(push.serverUUID == nil ? "absent" : "present", privacy: .public)
+            """)
 
         do {
-            try await callKit.reportIncomingCall(serverUUID: push.serverUUID, sipCallID: push.sipCallID,
-                                                 handle: push.handle)
+            let uuid = try await callKit.reportIncomingCall(serverUUID: push.serverUUID,
+                                                            sipCallID: push.sipCallID,
+                                                            handle: push.handle)
+            Self.logger.notice("VoIP push reported to CallKit as \(uuid, privacy: .public)")
         } catch {
             // PushKit's contract is satisfied — reportNewIncomingCall ran before this returns. The
             // system declined to ring (blocked caller, DND), which is its prerogative; nothing for

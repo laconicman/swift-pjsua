@@ -43,6 +43,17 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
     /// Optional RFC 8599 push parameters (see ``PushConfiguration``).
     public var push: PushConfiguration?
 
+    /// How long each registration asks to last, in seconds (`pjsua_acc_config.reg_timeout`).
+    /// `nil` keeps pjsua's default, `PJSUA_REG_INTERVAL` (300 s).
+    ///
+    /// Push-woken apps want this long. Once iOS suspends the app nothing refreshes the
+    /// registration, so when it expires the server drops the binding, and with it the push
+    /// target. The registrar may grant less than asked (Flexisip caps it at `max-expires`).
+    ///
+    /// Applied when the account is added; ``PJSUA/reRegister(_:updatingPush:)`` keeps the live
+    /// value.
+    public var registrationTimeout: UInt32?
+
     /// Make this the default account for outbound calls.
     public var isDefault: Bool
 
@@ -52,6 +63,7 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
                 realm: String = "*",
                 transportName: String? = nil,
                 push: PushConfiguration? = nil,
+                registrationTimeout: UInt32? = nil,
                 isDefault: Bool = true) {
         self.id = id
         self.registrar = registrar
@@ -59,6 +71,7 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
         self.realm = realm
         self.transportName = transportName
         self.push = push
+        self.registrationTimeout = registrationTimeout
         self.isDefault = isDefault
     }
 
@@ -85,6 +98,7 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
         realm = try container.decodeIfPresent(String.self, forKey: .realm) ?? "*"
         transportName = try container.decodeIfPresent(String.self, forKey: .transportName)
         push = try container.decodeIfPresent(PushConfiguration.self, forKey: .push)
+        registrationTimeout = try container.decodeIfPresent(UInt32.self, forKey: .registrationTimeout)
         isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? true
     }
 }

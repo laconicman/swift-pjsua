@@ -94,6 +94,11 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
     /// Seconds each REGISTER asks for → `acc_config.reg_timeout` (nil = pjsua's 300). Set on add
     /// only; long for push-woken apps, whose suspended refresh timer cannot keep a binding alive.
     public var registrationTimeout: UInt32?
+    /// RFC 5626 instance ID → `acc_config.rfc5626_instance_id`, sent as a lower-case UUID URN in
+    /// every REGISTER. Persistent and unique per device; set on add only (D-CONFIG-6).
+    public var instanceID: UUID?
+    /// SIP outbound on TCP/TLS → `acc_config.use_rfc5626` (pjsua default: on). Set on add only.
+    public var usesSIPOutbound: Bool = true
     public var isDefault: Bool = true
     // Deliberately NO password — see Layer B.
     // ⏳ TD-14: per-account `ice`/`turn` overrides (nil = inherit `Configuration.media`)
@@ -274,6 +279,34 @@ parameters, and with them the Contact, change on a registered account, the old b
 un-REGISTERed and answered first. It decides that from its record of the push parameters last
 applied (`appliedPush`), not by repeating modify's field comparisons. TD-21 states the condition
 the flag is set under; `Registration-Lifecycle.md` has the sequence.
+
+**D-CONFIG-6 — the RFC 5626 identity is fixed when the account is added.** *Added 2026-10-11 with
+swift-pjsip 0.3.0.* `instanceID` and `usesSIPOutbound` reach pjsua through `pjsua_acc_add` only.
+`reRegister`'s read-modify-write keeps whatever pjsua has, and there is no API to change them on a
+live account. Either one changes the binding's Contact, which `pjsua_acc_modify` answers with an
+un-REGISTER and a fresh REGISTER. On registrars that key bindings on the instance ID, changing it
+is precisely what leaves a stale binding. Remove and re-add instead.
+
+- **Why a `UUID`, not a string.** The engine prints `<urn:uuid:…>` in lower case. Registrars compare
+  instance values case-sensitively (measured on Kamailio), while `UUID.uuidString` is upper case. A
+  string would hand that trap to every app. A deployment that needs another shape (a shorter
+  value, say) can get its own field when one asks for it.
+- **Why the switch exists.** A configured ID is sent with or without outbound (pjsip/pjproject#5313,
+  in the binary since swift-pjsip 0.3.0). With outbound offered and not confirmed, pjsua sends
+  `reg-id` in the first REGISTER and drops it later. Measured on Flexisip, Kamailio and OpenSIPS:
+  each change to the Contact after the first REGISTER leaves the un-REGISTER unmatched on some
+  registrar family, and the binding stays until it expires. A configured ID with `usesSIPOutbound`
+  off keeps the Contact identical from the first REGISTER to the last. The default stays pjsua's
+  (on), so existing configurations do not change on the wire.
+- **What the wire carries** (`AccountConfigurationTests`, against 0.3.0): over UDP
+  `;+sip.instance="<urn:uuid:…>"`. Over TCP with outbound off the same, with no `reg-id`, no `ob`
+  and no `Supported: outbound`. Over TCP by default `;ob`, `;reg-id=1` and the instance, with
+  `Supported: outbound, path`.
+- Checked against pjsua source at `bd69054a6`: `pjsua_acc_add` copies the ID into the account pool
+  (`pjsua_acc.c:163`), so the engine's buffer only has to outlive the call. Turning outbound off
+  makes the 439 retry path unreachable: it requires `use_rfc5626` and an outbound offer actually
+  sent (`:3108-3110`, `:3331-3332`). `pjsua_acc_modify` treats both fields as unchanged when
+  handed the live values (`:1815`).
 
 ## 7. Sequencing
 

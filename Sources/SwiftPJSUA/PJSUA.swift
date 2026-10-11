@@ -142,8 +142,11 @@ public actor PJSUA {
 
     /// Create → init → start PJSUA. Runs on the executor thread; `pjsua_create()` makes
     /// that thread PJLIB's registered main thread, so all subsequent calls are safe.
+    ///
+    /// A start that throws leaves the engine as it found it, so it can be started again once the
+    /// cause is gone: a port another app holds, for instance.
     public func start(_ config: Configuration = .init()) throws {
-        precondition(state == .idle, "PJSUA.start() must be called exactly once")
+        precondition(state == .idle, "PJSUA.start() succeeds once; only a failed start may be retried")
 
         // 1. create — initializes PJLIB; THIS thread becomes the registered main thread.
         try pjsua_create().throwIfFailed()
@@ -251,6 +254,11 @@ public actor PJSUA {
             // 4. go
             try pjsua_start().throwIfFailed()
         } catch {
+            // Once `pjsua_create()` has succeeded, pjsua must be destroyed (`pjsua.h`), and its own
+            // sample does so when start fails. Left half built, the next start would create it over
+            // the remains, and the transport map would still name the dead transports.
+            pjsua_destroy()
+            transportIDs.removeAll()
             // A failed start must not leave the tap installed: `shutdown()` only clears it
             // on the running path, so a throw here would leak the sink into the next start.
             pjsuaLogSink = nil

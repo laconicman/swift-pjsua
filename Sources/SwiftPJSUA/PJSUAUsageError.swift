@@ -45,6 +45,10 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
     /// `pjsua_transport_id` to pin the account to.
     case unknownTransport(String)
 
+    /// ``AccountConfiguration/registrationTimeout`` was zero. A REGISTER asking for `Expires: 0`
+    /// removes the binding instead of keeping it; leave the field `nil` for pjsua's default.
+    case zeroRegistrationTimeout
+
     public var description: String {
         switch self {
         case .unknownAccount(let account):
@@ -63,6 +67,8 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
             "PJSUAUsageError.poolAllocationFailed"
         case .unknownTransport(let name):
             "PJSUAUsageError.unknownTransport(\(name))"
+        case .zeroRegistrationTimeout:
+            "PJSUAUsageError.zeroRegistrationTimeout"
         }
     }
 }

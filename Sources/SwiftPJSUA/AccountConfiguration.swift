@@ -44,7 +44,8 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
     public var push: PushConfiguration?
 
     /// How long each registration asks to last, in seconds (`pjsua_acc_config.reg_timeout`).
-    /// `nil` keeps pjsua's default, `PJSUA_REG_INTERVAL` (300 s).
+    /// `nil` keeps pjsua's default, `PJSUA_REG_INTERVAL` (300 s). Zero is refused with
+    /// ``PJSUAUsageError/zeroRegistrationTimeout``: `Expires: 0` removes the binding.
     ///
     /// Push-woken apps want this long. Once iOS suspends the app nothing refreshes the
     /// registration, so when it expires the server drops the binding, and with it the push

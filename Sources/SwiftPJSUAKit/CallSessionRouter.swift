@@ -243,7 +243,10 @@ public actor CallSessionRouter {
         if let call { uuidByCall[call] = uuid }
 
         let isNew = await registry.firstSeen(uuid: uuid, sipCallID: sipCallID, call: call)
-        guard isNew else { return uuid }
+        guard isNew else {
+            Self.logger.notice("call \(uuid, privacy: .public) already reported to CallKit")
+            return uuid
+        }
 
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: handle)

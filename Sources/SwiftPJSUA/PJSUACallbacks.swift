@@ -54,6 +54,9 @@ private nonisolated(unsafe) var pjsuaEventSink: AsyncStream<PJSUAEvent>.Continua
 private nonisolated(unsafe) var pjsuaCallEventSink: AsyncStream<PJSUAEvent>.Continuation?
 /// The engine's own registration channel (``RegistrationSignal``); same invariant as above.
 private nonisolated(unsafe) var pjsuaRegistrationSink: AsyncStream<RegistrationSignal>.Continuation?
+/// The engine's executor thread, recorded by ``installPJSUACallbacks(into:)``, which
+/// `PJSUA.start` runs there. Same invariant: written before `pjsua_init`, read-only thereafter.
+private nonisolated(unsafe) var pjsuaEngineThread: pthread_t?
 
 /// Process-global sink for pjsip's own log lines (`pjsua_logging_config.cb`). Same
 /// `nonisolated(unsafe)` invariant as the event sinks, with a narrower window: written once
@@ -154,6 +157,7 @@ private func emitCall(_ event: PJSUAEvent) {
 /// non-capturing (they only reference these file-private free functions), so they
 /// convert to `@convention(c)` function pointers automatically.
 func installPJSUACallbacks(into cfg: inout pjsua_config) {
+    pjsuaEngineThread = pthread_self()
     cfg.cb.on_call_state       = { callId, ev    in pjsuaOnCallState(callId, ev) }
     cfg.cb.on_incoming_call    = { acc, callId, rx in pjsuaOnIncomingCall(acc, callId, rx) }
     cfg.cb.on_call_media_state = { callId        in pjsuaOnCallMediaState(callId) }
@@ -402,18 +406,23 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     }
 }
 
-/// `on_reg_started2` — a REGISTER or un-REGISTER left through `pjsua_acc_set_registration`,
-/// whoever asked: the engine, or pjsua itself (an automatic retry, a Contact rewrite, an IP-change
-/// step). Runs with `PJSUA_LOCK` held, after pjsua dropped its own reference on the session.
+/// `on_reg_started2` — a REGISTER or un-REGISTER left through `pjsua_acc_set_registration`.
+/// Runs with `PJSUA_LOCK` held, after pjsua dropped its own reference on the session.
 ///
-/// Whether the transaction is still open is read here, where it is consistent: `is_busy` is the
-/// session's reference count or its open transaction. A response processed between the send and
-/// this callback has closed the transaction and dropped the worker's reference — its settlement
-/// was reported first — unless the worker is still inside it, blocked on `PJSUA_LOCK` with its
-/// reference held (`sip_reg.c`, `regc_tsx_callback`), and then the settlement follows. Either way
-/// `pending` tells the engine whether a settlement is still to come.
+/// Reported only when pjsua started it on a thread of its own: an automatic retry, a Contact
+/// rewrite, an IP-change step. A start on the engine's thread comes from a call the engine made,
+/// and the engine records those at the call (a send as pending, an IP change as running). This
+/// callback could not report them reliably: when the worker has just processed a fast response, it
+/// may have reported the settlement and released `PJSUA_LOCK` but still hold its reference on the
+/// session, so `is_busy` reads open (`sip_reg.c`, `regc_tsx_callback`) and the session would be
+/// left pending with no settlement to follow.
+///
+/// On pjsua's own thread the read holds: the one worker the engine pins (`thread_cnt`, timers
+/// polled on it too) processes this transaction's response only after this callback returns, so
+/// `pending` is whether a settlement is still to come.
 private func pjsuaOnRegStarted2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointer<pjsua_reg_info>?) {
     assertOnRegisteredPJThread()
+    if let engine = pjsuaEngineThread, pthread_equal(engine, pthread_self()) != 0 { return }
     guard let regInfo = info?.pointee else { return }
     var pending = false
     if let regc = regInfo.regc {

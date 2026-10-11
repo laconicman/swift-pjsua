@@ -5,11 +5,12 @@ import PJSIP
 /// through `.registrationState`; these carry what the engine needs to keep its own state and to
 /// sequence its work.
 enum RegistrationSignal: Sendable {
-    /// A REGISTER (`renew`) or un-REGISTER left through `pjsua_acc_set_registration`
-    /// (`on_reg_started2`), whoever asked for it: the engine, or pjsua itself — an automatic
-    /// retry, a Contact rewrite, an IP-change step. `pending` is whether its transaction was
-    /// still open when pjsua reported the start; it is not when the response had already been
-    /// processed, and then the settlement has been reported already.
+    /// A REGISTER (`renew`) or un-REGISTER that pjsua started by itself through
+    /// `pjsua_acc_set_registration` (`on_reg_started2`): an automatic retry, a Contact rewrite,
+    /// an IP-change step. The engine's own sends are not reported; it records them as it makes
+    /// them. `pending` is whether the transaction was still open when pjsua reported the start;
+    /// it is not when the response had already been processed, and then the settlement has been
+    /// reported already.
     case started(account: AccountID, renew: Bool, pending: Bool)
 
     /// A REGISTER or un-REGISTER on an account's current registration session ended

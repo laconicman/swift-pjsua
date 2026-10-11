@@ -48,3 +48,22 @@ public struct PushConfiguration: Sendable, Codable, Equatable {
         return PushConfiguration(params: params, scope: scope)
     }
 }
+
+extension PushConfiguration {
+    /// Whether a Contact URI a registrar listed carries every one of ``params``: names and values
+    /// compared without regard to case, in any order and among any other parameters.
+    func isCarried(by binding: String) -> Bool {
+        let present = Set(Self.parameters(in: Self.uriParameters(of: binding)))
+        return Self.parameters(in: params).allSatisfy(present.contains)
+    }
+
+    /// The `;`-separated parameters of a URI: after the address, before any `?headers`.
+    private static func uriParameters(of uri: String) -> Substring {
+        let bare = uri.drop { $0 == "<" }.prefix { $0 != ">" && $0 != "?" }
+        return bare.firstIndex(of: ";").map { bare[$0...] } ?? ""
+    }
+
+    private static func parameters(in list: some StringProtocol) -> [String] {
+        list.split(separator: ";").map { $0.lowercased() }
+    }
+}

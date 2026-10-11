@@ -38,6 +38,13 @@ public actor PJSUA {
     /// so an idle engine produces nothing.
     public nonisolated let callEvents: AsyncStream<PJSUAEvent>
 
+    /// The engine's own registration channel: what the callbacks report about registrations,
+    /// read by a task on this actor from ``start(_:)`` on. See `PJSUA+RegistrationLifecycle.swift`.
+    nonisolated let registrationSignals: AsyncStream<RegistrationSignal>
+
+    /// Registration bookkeeping, kept from this actor's own calls and from `registrationSignals`.
+    var registration = RegistrationLifecycle()
+
     enum State { case idle, running, stopped }
     private(set) var state: State = .idle
 
@@ -127,6 +134,7 @@ public actor PJSUA {
         let streams = makePJSUAEventStreams()
         self.events = streams.events
         self.callEvents = streams.callEvents
+        self.registrationSignals = streams.registrationSignals
         self.executor = PJSIPExecutor()
     }
 
@@ -249,6 +257,14 @@ public actor PJSUA {
             throw error
         }
         state = .running
+
+        // Apply the registration signals in this actor's turns for the engine's whole life; the
+        // loop ends when `shutdown` finishes the stream.
+        Task { [weak self, registrationSignals] in
+            for await signal in registrationSignals {
+                await self?.applyRegistrationSignal(signal)
+            }
+        }
     }
 
     /// Destroy PJSUA (on the executor thread) and stop the executor thread.
@@ -262,6 +278,7 @@ public actor PJSUA {
         transportIDs.removeAll()
         pjsuaLogSink = nil // worker threads are gone — safe to clear the process-global tap
         accountParameters.removeAll()
+        stopRegistrationLifecycle() // after the accounts are gone: each waiter finds its own gone
         finishPJSUAEventStreams()
         executor.stop()
     }
@@ -283,5 +300,8 @@ public actor PJSUA {
         var param = pjsua_ip_change_param()
         pjsua_ip_change_param_default(&param) // NULL param is a hard assert, not "defaults"
         try pjsua_handle_ip_change(&param).throwIfFailed()
+        // pjsua re-registers the accounts itself until the sequence reports `.completed`;
+        // registration operations stay out until then.
+        registration.ipChangeRunning = true
     }
 }

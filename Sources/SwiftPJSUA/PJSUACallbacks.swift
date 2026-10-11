@@ -13,7 +13,8 @@ import PJSIP
 // These functions are the ENTIRE surface that runs on PJSUA's worker threads. They are
 // deliberately free functions, `private` to this file, and hold **no reference to the
 // `PJSUA` actor**. Their only capability is to read POD out of C structs and `yield` a
-// `Sendable` ``PJSUAEvent``. Because they cannot reach the actor, they physically cannot
+// `Sendable` value: a ``PJSUAEvent``, or a ``RegistrationSignal`` on the engine's own channel,
+// which the actor reads in its own turns. Because they cannot reach the actor, they physically cannot
 // call an engine method or `await` it — so a callback can never re-enter a blocking
 // PJSIP call that the actor is already inside. Re-entrancy is prevented *by construction*,
 // not by convention. Keep it that way: never give these functions an actor reference, and
@@ -26,8 +27,8 @@ import PJSIP
 // A deep source review confirmed G2 is not merely tidy — some of these callbacks run with
 // pjsua's own locks **held**, so a synchronous re-entry would deadlock rather than misbehave:
 //
-//   held under PJSUA_LOCK  : on_reg_state, on_reg_state2, on_ip_change_progress,
-//                            on_incoming_call
+//   held under PJSUA_LOCK  : on_reg_state, on_reg_state2, on_reg_started2,
+//                            on_ip_change_progress, on_incoming_call
 //   no PJSUA_LOCK, but the dialog/tsx grp_lock is held upstream:
 //                            on_call_state, on_call_tsx_terminate_session, on_mwi_state,
 //                            on_auth_challenge
@@ -51,6 +52,8 @@ import PJSIP
 // user-data on these callbacks, replace the global with that.
 private nonisolated(unsafe) var pjsuaEventSink: AsyncStream<PJSUAEvent>.Continuation?
 private nonisolated(unsafe) var pjsuaCallEventSink: AsyncStream<PJSUAEvent>.Continuation?
+/// The engine's own registration channel (``RegistrationSignal``); same invariant as above.
+private nonisolated(unsafe) var pjsuaRegistrationSink: AsyncStream<RegistrationSignal>.Continuation?
 
 /// Process-global sink for pjsip's own log lines (`pjsua_logging_config.cb`). Same
 /// `nonisolated(unsafe)` invariant as the event sinks, with a narrower window: written once
@@ -89,10 +92,10 @@ func pjsuaOnLog(_ level: Int32, _ data: UnsafePointer<CChar>?, _ len: Int32) {
     }
 }
 
-/// Create the two event streams and install their continuations as the process-global
-/// sinks. Called once from `PJSUA.init` before anything can start delivering callbacks.
+/// Create the event streams and install their continuations as the process-global sinks.
+/// Called once from `PJSUA.init` before anything can start delivering callbacks.
 ///
-/// Two channels, two contracts (TD-3):
+/// Two public channels, two contracts (TD-3):
 /// - `events` is the complete record, bounded newest-first: every event lands here and
 ///   telemetry may drop under pressure — it carries only periodic (`.registrationState`,
 ///   re-delivered each renewal) or informational (`.callMediaEvent`) payloads besides
@@ -104,14 +107,23 @@ func pjsuaOnLog(_ level: Int32, _ data: UnsafePointer<CChar>?, _ len: Int32) {
 ///   unbounded, which is affordable precisely here: these events are per-call, so an
 ///   unconsumed buffer grows only with real call activity — an idle engine produces
 ///   none, unlike the periodic renewals a single unbounded stream would have retained.
+///
+/// The third, `registrationSignals`, is the engine's own and never reaches the app. It is
+/// unbounded because nothing may drop from it: the engine sequences account registrations on
+/// these signals. A task on the engine actor reads it for the engine's whole life, so it does
+/// not accumulate.
 func makePJSUAEventStreams() -> (events: AsyncStream<PJSUAEvent>,
-                                callEvents: AsyncStream<PJSUAEvent>) {
+                                callEvents: AsyncStream<PJSUAEvent>,
+                                registrationSignals: AsyncStream<RegistrationSignal>) {
     let (events, eventsContinuation) = AsyncStream<PJSUAEvent>.makeStream(
         bufferingPolicy: .bufferingNewest(64))
     let (callEvents, callContinuation) = AsyncStream<PJSUAEvent>.makeStream()
+    let (registrationSignals, registrationContinuation) =
+        AsyncStream<RegistrationSignal>.makeStream()
     pjsuaEventSink = eventsContinuation
     pjsuaCallEventSink = callContinuation
-    return (events, callEvents)
+    pjsuaRegistrationSink = registrationContinuation
+    return (events, callEvents, registrationSignals)
 }
 
 /// Finish the event streams (called from `PJSUA.shutdown`). Also resets the registration
@@ -120,6 +132,7 @@ func makePJSUAEventStreams() -> (events: AsyncStream<PJSUAEvent>,
 func finishPJSUAEventStreams() {
     pjsuaEventSink?.finish()
     pjsuaCallEventSink?.finish()
+    pjsuaRegistrationSink?.finish()
     regDedupLock.lock()
     lastEmittedRegState.removeAll()
     regDedupLock.unlock()
@@ -145,6 +158,7 @@ func installPJSUACallbacks(into cfg: inout pjsua_config) {
     cfg.cb.on_incoming_call    = { acc, callId, rx in pjsuaOnIncomingCall(acc, callId, rx) }
     cfg.cb.on_call_media_state = { callId        in pjsuaOnCallMediaState(callId) }
     cfg.cb.on_reg_state2       = { acc, info     in pjsuaOnRegState2(acc, info) }
+    cfg.cb.on_reg_started2     = { acc, info     in pjsuaOnRegStarted2(acc, info) }
     cfg.cb.on_stream_destroyed = { callId, strm, idx in pjsuaOnStreamDestroyed(callId, strm, idx) }
     cfg.cb.on_call_media_event = { callId, medIdx, ev in pjsuaOnCallMediaEvent(callId, medIdx, ev) }
     cfg.cb.on_call_transfer_status = { callId, code, text, final, pCont in
@@ -371,6 +385,77 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     } else {
         emitCall(event)
     }
+
+    // The engine's own record, heartbeats included: it keeps each account's session from these,
+    // and sequences its registration work on them.
+    if let param = regInfo.cbparam?.pointee {
+        let settlement = RegistrationSettlement(
+            account: AccountID(accId),
+            renew: renewing,
+            status: param.status,
+            code: statusCode,
+            expiration: expiration,
+            refreshIn: active ? refreshDelay(of: regInfo.regc) : nil,
+            bindings: registrarBindings(param)
+        )
+        pjsuaRegistrationSink?.yield(.settled(settlement))
+    }
+}
+
+/// `on_reg_started2` — a REGISTER or un-REGISTER left through `pjsua_acc_set_registration`,
+/// whoever asked: the engine, or pjsua itself (an automatic retry, a Contact rewrite, an IP-change
+/// step). Runs with `PJSUA_LOCK` held, after pjsua dropped its own reference on the session.
+///
+/// Whether the transaction is still open is read here, where it is consistent: `is_busy` is the
+/// session's reference count or its open transaction. A response processed between the send and
+/// this callback has closed the transaction and dropped the worker's reference — its settlement
+/// was reported first — unless the worker is still inside it, blocked on `PJSUA_LOCK` with its
+/// reference held (`sip_reg.c`, `regc_tsx_callback`), and then the settlement follows. Either way
+/// `pending` tells the engine whether a settlement is still to come.
+private func pjsuaOnRegStarted2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointer<pjsua_reg_info>?) {
+    assertOnRegisteredPJThread()
+    guard let regInfo = info?.pointee else { return }
+    var pending = false
+    if let regc = regInfo.regc {
+        var state = pjsip_regc_info()
+        if pjsip_regc_get_info(regc, &state).isSuccess { pending = state.is_busy.bool }
+    }
+    pjsuaRegistrationSink?.yield(.started(account: AccountID(accId),
+                                          renew: regInfo.renew.bool,
+                                          pending: pending))
+}
+
+/// Seconds until `regc`'s refresh timer sends the next REGISTER: `next_reg`, read in
+/// `on_reg_state2`, after pjsip scheduled the timer for the 2xx being reported
+/// (`schedule_registration` runs before the callback, `sip_reg.c`). That REGISTER leaves with no
+/// callback, so this is the engine's only notice of it.
+private func refreshDelay(of regc: OpaquePointer?) -> UInt32? {
+    guard let regc else { return nil }
+    var state = pjsip_regc_info()
+    guard pjsip_regc_get_info(regc, &state).isSuccess, state.auto_reg.bool else { return nil }
+    return state.next_reg
+}
+
+/// The Contact URIs a REGISTER response listed, printed as pjsip prints them. Reads the parsed
+/// response only: plain fields and formatting, nothing that takes a lock or enters pjsua.
+private func registrarBindings(_ param: pjsip_regc_cbparam) -> [String] {
+    var param = param
+    let count = Int(min(max(param.contact_cnt, 0), Int32(PJSIP_REGC_MAX_CONTACT)))
+    guard count > 0 else { return [] }
+    return withUnsafePointer(to: &param.contact) { tuple in
+        tuple.withMemoryRebound(to: UnsafeMutablePointer<pjsip_contact_hdr>?.self,
+                                capacity: count) { headers in
+            (0..<count).compactMap { index in
+                // A "Contact: *" header has no URI.
+                guard let uri = headers[index]?.pointee.uri else { return nil }
+                var buffer = [CChar](repeating: 0, count: Int(PJSIP_MAX_URL_SIZE))
+                let length = pjsip_uri_print(PJSIP_URI_IN_CONTACT_HDR, uri, &buffer, buffer.count)
+                guard length > 0 else { return nil }
+                return String(decoding: buffer[..<Int(length)].map { UInt8(bitPattern: $0) },
+                              as: UTF8.self)
+            }
+        }
+    }
 }
 
 /// `on_call_transfer_status` — REFER progress on the *transferor* leg. `pCont` stays
@@ -431,6 +516,8 @@ private func pjsuaOnIPChangeProgress(_ op: pjsua_ip_change_op,
         call = info.map { CallID($0.pointee.acc_reinvite_calls.call_id) }
     case PJSUA_IP_CHANGE_OP_COMPLETED:
         operation = .completed
+        // The engine holds account registrations still while the sequence runs.
+        pjsuaRegistrationSink?.yield(.ipChangeCompleted)
     default:
         operation = .unknown
     }

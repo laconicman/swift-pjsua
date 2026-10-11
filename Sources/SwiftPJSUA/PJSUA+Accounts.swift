@@ -72,6 +72,8 @@ extension PJSUA {
         accountParameters[account] = AccountParameters(config: config,
                                                       credentials: credentials,
                                                       generation: accountGeneration)
+        // Tracked from here; the first REGISTER's start arrives as a signal.
+        registration.sessions[account] = .unregistered
         return account
     }
 
@@ -90,6 +92,19 @@ extension PJSUA {
     public func removeAccount(_ account: AccountID) throws {
         try pjsua_acc_del(account.raw).throwIfFailed()
         accountParameters[account] = nil
+        registration.sessions[account] = nil
+    }
+
+    /// The stored parameters of `account`, provided it is still the account `generation` was
+    /// stamped on: pjsua recycles freed ids, so presence alone proves nothing across a suspension.
+    func liveParameters(_ account: AccountID, generation: UInt64) throws -> AccountParameters {
+        guard let live = accountParameters[account] else {
+            throw PJSUAUsageError.unknownAccount(account)
+        }
+        guard live.generation == generation else {
+            throw PJSUAUsageError.accountReplaced(account)
+        }
+        return live
     }
 
     /// Re-REGISTER an account, optionally replacing its push parameters first.

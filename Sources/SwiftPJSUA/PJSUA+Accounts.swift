@@ -82,17 +82,69 @@ extension PJSUA {
         try pjsua_acc_set_registration(account.raw, renew.pjBool).throwIfFailed()
     }
 
-    /// Remove an account: un-REGISTERs (best effort), deletes it from pjsua, and frees its
-    /// slot in the fixed account table (`pjsua_acc_del` — see ``addAccount(_:credentials:)``).
-    /// Any calls still using the account are unaffected at the SIP-dialog level but can no
-    /// longer authenticate re-INVITEs; hang up first.
+    /// Remove an account: un-REGISTER its binding and have the registrar answer, then delete it
+    /// from pjsua and free its slot in the fixed account table (`pjsua_acc_del` — see
+    /// ``addAccount(_:credentials:)``).
     ///
+    /// **A registration operation**: it waits for any REGISTER already in flight on the account to
+    /// settle, never fires into it. `pjsua_acc_del` alone sends its un-REGISTER and destroys the
+    /// session at once. With a REGISTER in flight the un-REGISTER is refused and the REGISTER
+    /// orphaned, and pjsip answers a 401 on the orphan with the session's own credentials: the
+    /// registrar would keep a binding, push parameters and all, for an account that no longer
+    /// exists. Here the un-REGISTER is answered first, so pjsua finds no session left to delete and
+    /// sends nothing more.
+    ///
+    /// The account is removed whatever the registrar answers. A failed un-REGISTER then throws
+    /// ``RegistrationError/rejected(_:statusCode:)`` all the same, because the registrar may keep
+    /// the binding until it expires.
+    ///
+    /// Calls still using the account are unaffected at the SIP-dialog level but can no longer
+    /// authenticate re-INVITEs; hang up first.
+    ///
+    /// - Parameter wait: ``RegistrationWait/dispatched`` returns once the un-REGISTER is sent (or
+    ///   at once, for an account with nothing to un-REGISTER); the account is deleted when it is
+    ///   answered.
     /// - Important: pjsua **recycles** freed ids — a later `addAccount` may return this same
     ///   ``AccountID``. Consumers keeping per-account state keyed by id must drop it here.
-    public func removeAccount(_ account: AccountID) throws {
+    public func removeAccount(_ account: AccountID, wait: RegistrationWait = .confirmed()) async throws {
+        guard let params = accountParameters[account] else {
+            throw PJSUAUsageError.unknownAccount(account)
+        }
+        let generation = params.generation
+        try await performRegistration(.account(account), wait: wait) { engine, operation in
+            try await engine.removeAccountSteps(account, generation: generation, operation: operation)
+        }
+    }
+
+    private func removeAccountSteps(_ account: AccountID,
+                                    generation: UInt64,
+                                    operation: UInt64) async throws {
+        let mailbox = openRegistrationMailbox(for: account)
+        defer { closeRegistrationMailbox(mailbox) }
+        var answer: RegistrationSettlement?
+        while true {
+            try await awaitQuietRegistration(account, generation: generation, mailbox: mailbox)
+            // Synchronous from this reading on: the session is quiet.
+            guard case .registered = registration.sessions[account], answer == nil else { break }
+            do {
+                try sendRegistration(account, renew: false)
+            } catch is RegistrationBusy {
+                continue
+            }
+            markRegistrationDispatched(operation)
+            answer = try await awaitSettlement(of: account, generation: generation,
+                                               mailbox: mailbox, renew: false)
+            // Back to a quiet reading before deleting: pjsua may start a REGISTER of its own after
+            // a failed un-REGISTER (its retry block does not exclude them).
+        }
+        _ = try liveParameters(account, generation: generation)
         try pjsua_acc_del(account.raw).throwIfFailed()
         accountParameters[account] = nil
         registration.sessions[account] = nil
+        markRegistrationDispatched(operation)
+        if let answer {
+            try confirmRegistration(answer, of: account, push: nil)
+        }
     }
 
     /// The stored parameters of `account`, provided it is still the account `generation` was

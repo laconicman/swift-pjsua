@@ -157,9 +157,9 @@ account in every account-level case, so a caller whose `addAccount` threw still 
 
 Every wait inside an operation has a 70 s backstop: pjsip ends a registration transaction within
 33 s (`REGC_TSX_TIMEOUT`), and a challenged one is two. pjsua can end a transaction and report
-nothing — the rewrite above, when its own send fails — so at the backstop the engine reads
-`pjsua_acc_get_info().expires` once to re-seed the session, and reports `.timedOut` if it is still
-busy. That is the engine's only read of pjsua's registration state. An IP change that hits the
+nothing — the rewrite above, when its own send fails before its transaction exists — so at the
+backstop the engine reads `pjsua_acc_get_info().expires` once to re-seed the session, and reports
+`.timedOut` if it is still busy. That is the engine's only read of pjsua's registration state. An IP change that hits the
 backstop while waiting for quiet goes ahead regardless; one that never reports `COMPLETED` throws
 `.ipChangeTimedOut`, and account operations resume.
 
@@ -176,6 +176,16 @@ backstop while waiting for quiet goes ahead regardless; one that never reports `
 3. **A `COMPLETED` that arrives after its IP change gave up** on the backstop can end the next
    sequence's wait early.
 4. **A transaction pjsua ends without calling back** leaves only the backstop and the one read.
+5. **A transport that dies under a registered session.** pjsua releases it and arms a retry with no
+   callback (`pjsua_acc.c:5536-5641`), so the session reads registered until the retry starts, 0–10 s
+   later with the default intervals. A send in that gap goes out on a new connection and cancels the
+   retry. `on_transport_state` would show it (TD-31).
+
+**Assumed, not enforced:** pjsua's default `contact_rewrite_method`, `NO_UNREG | ALWAYS_UPDATE`,
+which the engine does not change. With the un-REGISTER method, a Contact rewrite and an automatic
+retry send an un-REGISTER and destroy the session at once (`pjsua_acc.c:2636-2642`, `:5397-5407`);
+the start is reported pending, and its answer is dropped as a stale session's (`:3068`), so the
+account would read busy until the backstop.
 
 Trade-off, deliberate: an IP change waits for busy sessions to settle, and a transaction stalled on
 the old network path can hold it until pjsip's 32 s transaction timeout (Tech-Debt TD-32).

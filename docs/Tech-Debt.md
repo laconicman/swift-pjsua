@@ -301,6 +301,8 @@ every path that kills a call *without ending it* is invisible.**
   stays confirmed with dead media. Delivered on the **timer thread** via a 1 ms
   `pjsua_schedule_timer2` (`:1942`), not the media thread.
 - **`on_transport_state`** — SIP transport up/down. Earliest available signal that anything is wrong.
+  The app's callback runs before pjsua's own handler (`pjsua_core.c:2386-2397`), so the session's
+  transport can still be matched inside it (TD-31).
 - **`on_call_media_transport_state` / `on_ice_transport_error`** — ICE keep-alive failure
   (`pjsua_media.c:1107-1133`), the stack's only continuous media-liveness signal. Idle until ICE is
   enabled (offhook OH-4), cheap to wire alongside the others.
@@ -417,23 +419,31 @@ for the plain suspend/resume case, since nothing about the IP necessarily change
   `Push-vs-Active-Socket.md` §5.
 
 ## TD-31 — pjsua state the engine can learn only from callbacks · open (wired as needed)
-pjsua keeps state the engine needs for decisions and exposes no getter for, or only one whose
-reading under pjsua's threading can catch it mid-change. The registration lifecycle
-(`Registration-Lifecycle.md`) keeps one such state from callbacks — each account's session: in
-flight, registered with its refresh due, or unregistered — and the IP-change operation's turn
-stands for "a sequence is running". The rest is not kept:
+pjsua keeps state the engine needs for decisions and exposes no getter for it, or only one whose
+reading under pjsua's threading can catch it mid-change. `pjsua_acc_get_info` reads nothing but the
+last status and `next_reg`. The engine keeps two such states from callbacks: each account's session
+([Registration-Lifecycle](./Registration-Lifecycle.md)) and the IP-change sequence. The rest is
+listed here and wired when a decision needs it. Of `pjsua_callback`'s 59 members (PJSIP 2.17.0;
+master adds `on_call_siprec_metadata_update`) the engine installs 10; contexts of the ones below are
+in [Threading-Validation](./Threading-Validation.md).
 
-- **An automatic retry pending** after a failed REGISTER: a pjsua timer with no callback until it
-  fires. The source of the window in `Registration-Lifecycle.md` §3.1.
-- **A Contact rewritten** by `acc_check_nat_addr`: the 2xx is swallowed, and nothing says why.
-- **The outbound flow** (`rfc5626_status`), **the server-affinity pin**, and **the transport a
-  session uses**, with its state (`on_transport_state` is not installed; TD-24).
+| State | Reachable through | Silent when | Wire when |
+|---|---|---|---|
+| The account's TCP/TLS connection | `on_transport_state`, matched against `pjsip_regc_get_info(regc).transport` read in `on_reg_state2`. The regc holds a reference on it, and the app's callback runs before pjsua's own handler | while suspended (nothing is sent); pjsua's own reaction to `DISCONNECTED` (releases the transport, demotes outbound, arms a retry) has no callback | TD-24's resume policy or OH-12's "skip `ip_change` when the connection is fresh": a `CONNECTED` after the last resume is the freshness proof pjsua has no getter for |
+| An INVITE pjsua refused itself | `on_rejected_incoming_call` (`rdata` carries the Call-ID) | — `on_incoming_call` never fires for it | the Kit ends a push-reported call now instead of on the pending-entry sweep |
+| An auth challenge outstanding | `on_auth_challenge` | a deferred REGISTER challenge clears `has_tsx`, so `is_busy` reads idle | credential-on-demand (TD-11). **2.17.0's deferred path is a use-after-free for REGISTER** (upstream `5c605b499`): bump `swift-pjsip` first |
+| An automatic retry pending | inferred: a failure settlement with a retryable code (408, 480, 500, 502–504, 6xx) or a 439 to an outbound REGISTER, while `reg_retry_interval` ≠ 0 and no IP change; or the session transport's `DISCONNECTED` | arming; re-arming after the timer's own send fails | a decision that must not race the retry (Registration-Lifecycle §3.1) |
+| A Contact rewritten | inferred: a pjsua-thread `on_reg_started2` while the engine's own send is unsettled (the 2xx was swallowed); the rewrite's settlement lists the new Contact | the swallowed 2xx; with ALWAYS_UPDATE, the rewrite on a ≥ 400 answer | a decision on the registered Contact |
+| The outbound flow (`rfc5626_status`) | recomputable from the 2xx in `on_reg_state2` (`Require: outbound`), given outbound was offered | demotion on transport loss | an outbound-specific reachability decision |
+| The server-affinity pin | none (setter and clearer only) | always | when `server_affinity` is exposed; impose it with the setter rather than observe it |
+| ICE / TURN health | `on_call_media_transport_state`, `on_ice_transport_error` | **always for the peer path**: `KEEP_ALIVE` means a TURN refresh failure only, a STUN keep-alive failure after init is dropped, and the keep-alive to the peer is a Binding Indication with no response | OH-4 (ICE with TURN). Not a media-liveness detector: that stays the RTP counter (TD-27) |
 
-- **Trigger:** a decision that needs one of these. Wire it as the session state was wired: the
-  callback yields a `Sendable` value on the engine's channel, the actor applies it in its own turn,
-  and the callback's thread and lock context go into `Threading-Validation.md` first.
-- **Owed alongside:** an inventory of every pjsua callback the engine does not install — what it
-  conveys, its context, its would-be consumer.
+- **How to wire:** as the session state was wired. The callback yields a `Sendable` value on the
+  engine's channel, the actor applies it in its own turn, and the callback's thread and locks go into
+  Threading-Validation first.
+- **Not owed:** presence, IM, MWI, DTMF, transfer requests, SDP and stream hooks, media-transport
+  factories, conference-op callbacks. Wire them with their features.
+- Relates: TD-9, TD-11, TD-24, TD-27, TD-32; offhook OH-4, OH-10, OH-12.
 
 ## TD-32 — an IP change waits behind a transaction stalled on the old path · open (deliberate)
 `handleIPChange` starts once no account's registration is busy, so a REGISTER stalled on a network
@@ -445,7 +455,8 @@ chosen; not measured on a device.
 
 - **Also bounded only by the backstop:** a sequence that never reports `COMPLETED`, because an
   account's step never ends — its re-REGISTER's 2xx swallowed by a Contact rewrite whose own send
-  fails, which no callback reports (`pjsua_acc.c`, `regc_cb`). After 70 s the call throws
+  fails before its transaction exists, which no callback reports (`pjsua_acc.c`, `regc_cb`; a send
+  that fails after that reports its failure, synchronously). After 70 s the call throws
   `ipChangeTimedOut` and account operations resume.
 - **Possible refinement:** skip the wait for a session whose transport the sequence shuts down
   anyway, which needs the transport identity TD-31 lists.

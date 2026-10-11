@@ -115,3 +115,27 @@ against `288de6142`, the source of the shipped binary.
 - **The registration channel is applied in the actor's own turns.** A task on the engine actor
   reads it, so G2 holds: a callback yields and returns.
 
+## Addendum 2026-10-11 (b) — callbacks not installed yet
+
+Verified against `288de6142` (master `bd69054a6` where noted) for the callbacks TD-31 may wire. With
+`thread_cnt = 1` the worker polls the SIP ioqueue and the timer heap; ICE uses the same ioqueue and
+heap, so ICE callbacks run on the worker, not the media thread (`pjsua_media.c:1179-1181`).
+
+| Callback | Thread | Locks held when invoked |
+|---|---|---|
+| `on_transport_state` `DISCONNECTED` (socket error) | worker: read/write completion, keep-alive timer; **the sending thread** when an immediate send fails (`sip_transport_tcp.c:1360-1384`), which can be the engine's | none: no transport-manager or transport lock, a transport reference held for the callback (`:186-225`); the ioqueue key lock is released before a read callback (`ioqueue_common_abs.c:836-847`) |
+| `on_transport_state` `SHUTDOWN` / forced `DISCONNECTED` | nested inside the `DISCONNECTED` above (pjsua's handler shuts the transport down, `pjsua_acc.c:5555`); the worker in `regc_cb`'s 408 path (`:3144`); **the engine's thread** inside `pjsua_handle_ip_change` (`pjsua_core.c:4213-4217`) and in `restart_listener` (`:4026`) | **transport-manager lock and transport lock** (`sip_transport.c:1539-1576`); plus `PJSUA_LOCK` on the `regc_cb` and IP-change paths |
+| `on_transport_state` `DESTROY` | worker (idle timer, `sip_transport.c:1166-1208`) | none (`:1585-1600`) |
+| `on_transport_state` `CONNECTED` | worker (connect completion) | none observed |
+| `on_call_media_transport_state` (lifecycle) | the thread of the media operation: the engine's for `make_call`, the worker's for an incoming INVITE or re-INVITE | `PJSUA_LOCK` on the disconnect deinit path; the call's lock otherwise (not traced per site) |
+| `on_call_media_transport_state` / `on_ice_transport_error` (ICE `KEEP_ALIVE`, `ADDR_CHANGE`) | worker | no pjsua lock; ICE stream `grp_lock` not held (`pjsua_media.c:1107-1133`; `ice_strans.c:2971-2984`) |
+| `on_rejected_incoming_call` | worker | **`PJSUA_LOCK` held**, dialog lock already released (`pjsua_call.c:1767`, `:2470-2491`) |
+| `on_auth_challenge` (REGISTER) | worker | tsx `grp_lock` held, regc lock released, no `PJSUA_LOCK` (`sip_reg.c:1339-1356`) |
+
+Order inside one transport event: the app's `on_transport_state` first, then pjsip's per-transport
+listeners (transport lock), then pjsua's account handler (`PJSUA_LOCK`) (`pjsua_core.c:2386-2397`).
+pjsua's handler shuts the transport down, so a `DISCONNECTED` is followed by a nested `SHUTDOWN`
+before the first callback chain returns. One addition to an installed callback: **`on_reg_state2`
+also runs on the sending thread** when a REGISTER's send fails after its transaction exists, before
+`pjsua_acc_set_registration` returns (`sip_util_statefull.c:120-127`). G2 makes all of these safe as
+they stand.

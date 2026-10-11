@@ -300,13 +300,21 @@ extension PJSUA {
             }
             acc.transport_id = transportID
         }
+        var owners: [PJString] = [idOwner, regOwner]
+
         // Add path only: reRegister's read-modify-write keeps the live value (D-CONFIG-4).
         if let timeout = config.registrationTimeout {
             guard timeout > 0 else { throw PJSUAUsageError.zeroRegistrationTimeout }
             acc.reg_timeout = timeout
         }
-
-        var owners: [PJString] = [idOwner, regOwner]
+        // Add path only as well: either one changes the Contact of a registered binding, and
+        // pjsua_acc_modify would answer that with an un-REGISTER and a fresh REGISTER (D-CONFIG-6).
+        if let instanceID = config.instanceID {
+            let instanceOwner = PJString("<urn:uuid:\(instanceID.uuidString.lowercased())>")
+            owners.append(instanceOwner)
+            acc.rfc5626_instance_id = instanceOwner.value
+        }
+        acc.use_rfc5626 = config.usesSIPOutbound ? 1 : 0
         owners += applyOwnedFields(to: &acc, config: config, secret: secret)
 
         return try withExtendedLifetime(owners) {

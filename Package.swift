@@ -51,10 +51,11 @@ let package = Package(
         // exactly the releases that cannot change the ABI under us, and adopting a new
         // binary stays a deliberate one-line edit with a diff to review.
         //
-        // Do not lower the floor. 0.3.0 is the first binary whose module exports PJSIP_EBUSY
-        // to Swift, and the first with the whole-file certificate read and the working
-        // listener restart the TLS tests assert (pjproject#5222, #5233). Older releases fall
-        // short further: 0.2.0 was deleted — its module map dropped
+        // Do not lower the floor. 0.3.0 is the first binary that sends a configured SIP
+        // instance ID without SIP outbound (pjproject#5313), which AccountConfiguration's
+        // instanceID relies on; the first whose module exports PJSIP_EBUSY to Swift; and the
+        // first with the whole-file certificate read and the working listener restart the TLS
+        // tests assert (pjproject#5222, #5233). Older releases fall short further: 0.2.0 was deleted — its module map dropped
         // config_site.h's overrides, so Swift compiled PJSUA_MAX_ACC 4 against a binary built
         // with 8 (see swift-pjsip ARCHITECTURE.md decision 4) — and 0.1.x is PJSIP 2.16, below
         // the upstream floor this engine relies on for the 439 / RFC 5626 handling.

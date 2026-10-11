@@ -218,6 +218,13 @@ extension PJSUA {
         return id
     }
 
+    /// Drop the signals `mailbox` holds: all applied before a send the caller is about to make,
+    /// so none can answer it — a refresh that settled while an operation waited for its secret,
+    /// say. Signals from the send itself are applied after it, and arrive afterwards.
+    func discardRegistrationSignals(in mailbox: UInt64) {
+        registration.mailboxes[mailbox]?.pending.removeAll()
+    }
+
     func closeRegistrationMailbox(_ mailbox: UInt64) {
         resumeRegistrationMailbox(mailbox, with: nil)
         registration.mailboxes[mailbox] = nil
@@ -352,6 +359,7 @@ extension PJSUA {
                               generation: UInt64,
                               mailbox: UInt64,
                               operation: UInt64) async throws -> RegistrationSettlement? {
+        discardRegistrationSignals(in: mailbox)
         do {
             try sendRegistration(account, renew: renew)
         } catch is RegistrationBusy {

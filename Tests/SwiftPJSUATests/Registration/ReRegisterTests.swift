@@ -257,6 +257,47 @@ extension RegistrationTests {
             #expect(!push.isCarried(by: "sip:alice@10.0.0.1:5060?pn-provider=apns"))
         }
 
+        /// A refresh that settles while the operation waits for its secret is applied before the
+        /// REGISTER goes out, and must not be taken for that REGISTER's answer. pjsip refreshes a
+        /// 10 s registration 5 s in; the secret takes 6 s; the registrar answers the REGISTER 1 s
+        /// late.
+        @Test func aRefreshDuringTheSecretFetchDoesNotAnswerTheRegister() async throws {
+            let registrar = try ScriptedRegistrar { _, index in
+                (.ok, after: index == 2 ? .seconds(1) : .zero)
+            }
+            defer { registrar.stop() }
+            let secrets = SlowSecondSecret()
+
+            try await RegistrationTests.withEngine { engine in
+                var config = RegistrationTests.account(registrar)
+                config.registrationTimeout = 10
+                let account = try await engine.addAccount(
+                    config, credentials: InlineCredentialStore { _ in try await secrets.next() })
+
+                try await engine.reRegister(account)
+
+                let answered = ContinuousClock.now
+                let fetched = try #require(await secrets.lastReturn)
+                let requests = registrar.requests
+                #expect(requests.count == 3, "add, refresh, re-register: \(requests)")
+                #expect(answered - fetched >= .milliseconds(800),
+                        "returned on the refresh's answer, not the REGISTER's")
+            }
+        }
+
+        /// Secrets for the test above: the second one, the re-registration's, takes 6 s.
+        private actor SlowSecondSecret {
+            private var fetches = 0
+            private(set) var lastReturn: ContinuousClock.Instant?
+
+            func next() async throws -> String {
+                fetches += 1
+                if fetches == 2 { try await Task.sleep(for: .seconds(6)) }
+                lastReturn = .now
+                return "secret"
+            }
+        }
+
         /// A password the test can change while the engine holds the store.
         private final class Password: @unchecked Sendable {
             private let lock = NSLock()

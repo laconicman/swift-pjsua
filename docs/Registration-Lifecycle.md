@@ -128,7 +128,10 @@ TD-21 allows it: the engine registers itself in the same synchronous step.
 
 The answer to the engine's (un-)REGISTER is the next settlement of that kind after the send. The
 send came from a quiet session, whose reports were all applied, so the next one is its own —
-including when a fast registrar's 2xx is reported before pjsua returns from the send. When a NAT
+including when a fast registrar's 2xx is reported before pjsua returns from the send. Reports the
+operation's mailbox already holds are discarded before each send: all applied before it, so none
+can answer it — a refresh that settled while `reRegister` waited for its secret, for one. The IP
+change discards them before its kickoff the same way. When a NAT
 Contact rewrite swallows the 2xx and re-registers, the rewrite's settlement answers instead, which
 is the binding the registrar now holds.
 

@@ -328,6 +328,8 @@ public actor PJSUA {
         await awaitQuietRegistrations(mailbox: mailbox)
         guard !registration.stopped else { throw CancellationError() }
 
+        // A `COMPLETED` already applied belongs to an earlier sequence, not to this one.
+        discardRegistrationSignals(in: mailbox)
         var param = pjsua_ip_change_param()
         pjsua_ip_change_param_default(&param) // NULL param is a hard assert, not "defaults"
         try pjsua_handle_ip_change(&param).throwIfFailed()

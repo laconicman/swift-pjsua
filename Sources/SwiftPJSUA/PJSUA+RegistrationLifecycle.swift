@@ -179,6 +179,12 @@ extension PJSUA {
                     ? .registered(refreshDue: settlement.refreshIn.map { .now + .seconds($0) })
                     : .unregistered
             }
+            if let count = registration.reportsOfFailedSends[settlement.account] {
+                // A failed send's own report. Its operation has already thrown, and the next one
+                // must not take it for the answer to its send.
+                registration.reportsOfFailedSends[settlement.account] = count > 1 ? count - 1 : nil
+                return
+            }
         case .ipChangeCompleted:
             break   // for the IP-change operation's mailbox
         }
@@ -196,6 +202,7 @@ extension PJSUA {
     func stopRegistrationLifecycle() {
         registration.stopped = true
         registration.sessions.removeAll()
+        registration.reportsOfFailedSends.removeAll()
         for id in registration.mailboxes.keys {
             resumeRegistrationMailbox(id, with: nil)
         }
@@ -360,8 +367,10 @@ extension PJSUA {
     /// - Throws: ``RegistrationBusy`` when pjsua refuses because a transaction of its own started
     ///   after the quiet reading (its start not yet applied); the session is then marked pending, so
     ///   the caller's next wait for quiet waits for that transaction. Any other refusal throws
-    ///   ``RegistrationError/failed(_:_:)``.
+    ///   ``RegistrationError/failed(_:_:)``. Such a send may have reported a settlement already: when
+    ///   pjsip had created the transaction, it ends it in place, on this thread.
     private func sendRegistration(_ account: AccountID, renew: Bool) throws {
+        let reported = pjsuaSettlementsOnEngineThread()
         let status = pjsua_acc_set_registration(account.raw, renew.pjBool)
         if status.isSuccess || status == PJSIP_EBUSY {
             // In flight: ours, or the one that refused ours.
@@ -374,8 +383,17 @@ extension PJSUA {
             throw RegistrationBusy()
         }
         guard status.isSuccess else {
+            if pjsuaSettlementsOnEngineThread() != reported {
+                expectReportOfFailedSend(on: account)
+            }
             throw RegistrationError.failed(account, PJSUAError(status: status))
         }
+    }
+
+    /// Note that a failed send on `account` has reported its settlement, which is still to be
+    /// applied: it updates the session, and no operation takes it for an answer.
+    func expectReportOfFailedSend(on account: AccountID) {
+        registration.reportsOfFailedSends[account, default: 0] += 1
     }
 
     /// Whether the registrar took what the engine sent: a 2xx; for a REGISTER also an expiry and,

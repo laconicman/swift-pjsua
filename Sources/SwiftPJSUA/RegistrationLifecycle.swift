@@ -26,6 +26,10 @@ struct RegistrationLifecycle {
     /// Sessions of the accounts the engine added; signals for others are ignored.
     var sessions: [AccountID: Session] = [:]
 
+    /// Per account, the settlements failed sends reported before returning their error, not yet
+    /// applied. Each updates the session and answers no operation.
+    var reportsOfFailedSends: [AccountID: Int] = [:]
+
     /// Set by ``PJSUA/shutdown()``: no signal comes any more, so nothing may wait for one.
     var stopped = false
 

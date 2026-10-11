@@ -52,5 +52,35 @@ extension RegistrationTests {
                 #expect(requests.map(\.isUnregister) == [false, true, false], "\(requests)")
             }
         }
+
+        /// A send that pjsip created a transaction for and then failed to send reports a failure
+        /// settlement on the engine's thread before the error returns. The report updates the
+        /// session, and the account's next operation must not take it for its own answer. pjsip
+        /// ends a send that way only on a transport failure loopback cannot stage on demand, so
+        /// this drives the actor the way `sendRegistration` does after such a send.
+        @Test func aFailedSendsOwnReportAnswersNoOperation() async throws {
+            let registrar = try ScriptedRegistrar { _, _ in (.ok, after: .zero) }
+            defer { registrar.stop() }
+
+            try await RegistrationTests.withEngine { engine in
+                let account = try await engine.addAccount(RegistrationTests.account(registrar),
+                                                          credentials: RegistrationTests.password)
+                let mailbox = await engine.openRegistrationMailbox(for: account)
+                let failure = RegistrationSettlement(account: account, renew: true, status: 0,
+                                                     code: 503, expiration: 0, refreshIn: nil,
+                                                     bindings: [])
+
+                await engine.expectReportOfFailedSend(on: account)
+                await engine.applyRegistrationSignal(.settled(failure))
+                #expect(await engine.registration.sessions[account] == .unregistered)
+                #expect(await engine.registration.mailboxes[mailbox]?.pending.isEmpty == true,
+                        "the failed send's report was delivered as an answer")
+
+                await engine.applyRegistrationSignal(.settled(failure))
+                #expect(await engine.registration.mailboxes[mailbox]?.pending.count == 1,
+                        "a later report was swallowed")
+                await engine.closeRegistrationMailbox(mailbox)
+            }
+        }
     }
 }

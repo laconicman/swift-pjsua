@@ -40,6 +40,7 @@ caught where it is recoverable.
 | With `disable_reg_on_modify`, modify sends neither, and still destroys the session on `unreg_first`. The flag is read from the struct passed in, never stored | `pjsua_acc.c:1930`, `:1940`, `:1949` |
 | `pjsua_acc_add` sends the first REGISTER only when `register_on_acc_add` is set, and ignores the result | `pjsua_acc.c:906-908` |
 | A send on a session with a transaction pending fails `PJSIP_EBUSY`; nothing is sent | `sip_reg.c:1586-1594` |
+| A send that fails once its transaction exists is ended in place: `on_reg_state2` reports the failure on the sending thread, before `pjsua_acc_set_registration` returns the error | `sip_util_statefull.c:120-127`; `sip_transaction.c:2650-2683` |
 | Destroying a session with a transaction pending only sets `_delete_flag` and drops the callback | `sip_reg.c:198-206` |
 | A 401/407 on such an orphan is still answered, from `tsx->last_tx`: the old Contact | `sip_reg.c:1269-1399` |
 | `pjsua_acc_del` un-REGISTERs and destroys the session without waiting for the answer | `pjsua_acc.c:1097-1106` |
@@ -131,6 +132,12 @@ including when a fast registrar's 2xx is reported before pjsua returns from the 
 Contact rewrite swallows the 2xx and re-registers, the rewrite's settlement answers instead, which
 is the binding the registrar now holds.
 
+A send that fails after pjsip created its transaction has reported its own failure by the time the
+error returns, on the engine's thread. The bridge counts settlements reported there, so the engine
+sees whether the failed send reported one. That report updates the session and answers no
+operation: the failed operation has thrown, and the account's next operation must not take it for
+the answer to its own send.
+
 ### Done
 
 A 2xx with an expiry and, when the account has push parameters and the registrar lists bindings,
@@ -214,6 +221,7 @@ chosen delay.
 | | `dispatchedReturnsOnceTheRegisterIsSent` | `.dispatched` |
 | `SetRegistration` | `unregisteringWhileTheFirstRegisterIsChallengedWaitsForIt` | no `PJSIP_EBUSY`; the un-REGISTER after the challenged REGISTER's answer |
 | | `unregisterThenRegisterAgain` | one request each, each returning on its answer |
+| | `aFailedSendsOwnReportAnswersNoOperation` | a failed send's report updates the session and answers nothing |
 | `ReRegister` | `pushChangeWhileTheFirstRegisterIsChallengedWaitsForIt` | the TD-23 case: un-REGISTER answered before the new REGISTER, nothing push-less after it |
 | | `pushChangeOnAQuietAccountUnregistersThenRegistersOnce` | the Contact path |
 | | `unchangedParametersSendOneRegisterOnTheSameSession` | same Call-ID |

@@ -57,6 +57,19 @@ private nonisolated(unsafe) var pjsuaRegistrationSink: AsyncStream<RegistrationS
 /// The engine's executor thread, recorded by ``installPJSUACallbacks(into:)``, which
 /// `PJSUA.start` runs there. Same invariant: written before `pjsua_init`, read-only thereafter.
 private nonisolated(unsafe) var pjsuaEngineThread: pthread_t?
+/// Settlements reported on the engine's thread; see ``pjsuaSettlementsOnEngineThread()``. Written
+/// and read only on that thread.
+private nonisolated(unsafe) var pjsuaEngineThreadSettlements: UInt64 = 0
+
+private func isOnEngineThread() -> Bool {
+    pjsuaEngineThread.map { pthread_equal($0, pthread_self()) != 0 } ?? false
+}
+
+/// How many settlements have been reported on the engine's thread so far; read it on that thread.
+/// A send that pjsip ends in place — the transaction created, then its send failed — reports its
+/// settlement there, synchronously, before the send returns its error (`sip_util_statefull.c`,
+/// `pjsip_endpt_send_request`), so the count before and after a send tells whether it reported one.
+func pjsuaSettlementsOnEngineThread() -> UInt64 { pjsuaEngineThreadSettlements }
 
 /// Process-global sink for pjsip's own log lines (`pjsua_logging_config.cb`). Same
 /// `nonisolated(unsafe)` invariant as the event sinks, with a narrower window: written once
@@ -402,6 +415,7 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
             refreshIn: active ? refreshDelay(of: regInfo.regc) : nil,
             bindings: registrarBindings(param)
         )
+        if isOnEngineThread() { pjsuaEngineThreadSettlements &+= 1 }
         pjsuaRegistrationSink?.yield(.settled(settlement))
     }
 }
@@ -422,7 +436,7 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
 /// `pending` is whether a settlement is still to come.
 private func pjsuaOnRegStarted2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointer<pjsua_reg_info>?) {
     assertOnRegisteredPJThread()
-    if let engine = pjsuaEngineThread, pthread_equal(engine, pthread_self()) != 0 { return }
+    if isOnEngineThread() { return }
     guard let regInfo = info?.pointee else { return }
     var pending = false
     if let regc = regInfo.regc {

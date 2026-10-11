@@ -286,10 +286,11 @@ multiple sources beyond the primitive `connectVideo`) is deferred — see Tech-D
   (`PJSUA+/PJSUACallbacks`). Keep; add `reason` phrase passthrough for diagnostics.
 - RFC 8599: `reg_contact_uri_params = ";pn-provider=apns;pn-param={team}.{bundle}.voip;pn-prid={tok}"`
   set before `pjsua_acc_add`. Already implemented as free-form `PushConfiguration` + `apns(...)`
-  builder + `reRegister(_:updatingPush:)`.
+  builder + `reRegister(_:updatingPush:wait:)`.
 - **Silent push → re-REGISTER with updated params must NOT collide with the VoIP-push answer path.**
-  These are independent: silent push → `engine.reRegister(account, updatingPush:)` (rebuilds acc
-  config from stored `AccountParameters`, `pjsua_acc_modify`, `pjsua_acc_set_registration(renew)`).
+  These are independent: silent push → `engine.reRegister(account, updatingPush:)` (applies the
+  stored `AccountParameters` with `pjsua_acc_modify` and registers as a registration operation —
+  `Registration-Lifecycle.md`).
   VoIP push → CallKit report + await INVITE. The router serializes both onto the engine actor, so
   there is no shared-state race; the only ordering rule is "a re-REGISTER never tears down an
   in-flight call," which holds because `acc_modify` doesn't drop calls. (DeepWiki RFC 8599 +

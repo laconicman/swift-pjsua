@@ -28,8 +28,9 @@ public actor CallSessionRouter {
     private let events: AsyncStream<PJSUAEvent>
 
     /// Account used for outgoing calls (`CXStartCallAction`). The app sets this (via
-    /// ``setOutgoingAccount(_:)``) after it has added an account through ``PJSUA/addAccount(_:)``;
-    /// a `CXStartCallAction` arriving while it is `nil` fails (nowhere to place the call from).
+    /// ``setOutgoingAccount(_:)``) after it has added an account through
+    /// ``PJSUA/addAccount(_:credentials:wait:)``; a `CXStartCallAction` arriving while it is `nil`
+    /// fails (nowhere to place the call from).
     private var outgoingAccount: AccountID?
 
     /// App-facing relay of `.registrationState` transitions. The router consumes the engine streams

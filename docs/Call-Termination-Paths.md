@@ -37,8 +37,11 @@ until something next tries to use that dialog. Over UDP there is no transport-de
 And there is **no RTP inactivity detector anywhere in pjmedia**: `PJMEDIA_STREAM_ENABLE_KA` only
 *transmits* keep-alives, it does not notice their absence.
 
-The one continuous media-liveness signal in the entire stack is **ICE keep-alive failure**
-(`pjsua_media.c:1107-1133`) — and Offhook does not enable ICE ([OH-4](../../offhook/docs/Tech-Debt.md)).
+There is **no continuous media-liveness signal in the stack, ICE included.** With ICE, pjsua reports a
+TURN-refresh failure and a STUN-detected change of the mapped address (`pjsua_media.c:1107-1133`),
+but neither the peer path — its keep-alive is a Binding Indication, which gets no response — nor a
+STUN keep-alive failure after init (§4). The RX packet counter is the only peer-liveness detector,
+with or without ICE; Offhook does not enable ICE anyway ([OH-4](../../offhook/docs/Tech-Debt.md)).
 
 ---
 
@@ -61,7 +64,7 @@ statistics record.
 | 10 | **SRTP negotiation failure** | same as 9 | — | — | `pjsua_media.c:1985-1995` |
 | 11 | **Media update failure** (re-INVITE SDP) | stop stream, close transport, `MEDIA_ERROR`, **call NOT ended** | — | ⚠️ | `pjsua_media.c:4785-4798` — `stop_media_stream()` runs, so the callback *does* fire here; the call continues without media |
 | 12 | **Media transport error** (`PJMEDIA_EVENT_MEDIA_TP_ERR`) | **nothing** — forwarded to app, no state change | — | — | §3. **Observed**: for a blackholed path the event is never even raised |
-| 13 | **ICE keep-alive failure** | `on_call_media_transport_state` + `on_ice_transport_error` | — | — | `pjsua_media.c:1107-1133`. Only continuous liveness signal in the stack |
+| 13 | **ICE TURN-refresh failure** | `on_call_media_transport_state` + `on_ice_transport_error` | — | — | `pjsua_media.c:1107-1133`; `ice_strans.c:3029-3032`. Not peer liveness: the keep-alive to the peer gets no response, and a STUN keep-alive failure after init is dropped |
 | 14 | **TCP/TLS transport death, call idle** | **nothing, indefinitely** | — | — | §4. The gap. **Observed: 938 s of silence** (§4.1) |
 | 15 | **TCP/TLS transport death, transaction in flight** | tsx force-failed on next timer tick | ✅ | ✅ | `sip_transaction.c:2572-2576` — zero-delay `TRANSPORT_DISC_TIMER`, not the full Timer B/F wait |
 | 16 | **UDP "transport death"** | does not exist as an event | — | — | Connectionless; only paths 6/9-13 or a session timer can notice. **Unobservable from this stack** — see §6.5 |
@@ -264,8 +267,8 @@ Three delivery details that matter to a Swift wrapper:
 | Signal | Callback | Reaches Swift today? |
 |---|---|---|
 | ICE / SRTP negotiation failure → `PJSUA_CALL_MEDIA_ERROR` | `on_call_media_state` | ✅ — mapped to `CallMediaStatus.error` |
-| Media transport state changes, incl. ICE keep-alive failure | `on_call_media_transport_state` | ❌ not installed |
-| ICE keep-alive failure (dedicated) | `on_ice_transport_error` | ❌ not installed |
+| Media transport state changes, incl. ICE TURN-refresh failure | `on_call_media_transport_state` | ❌ not installed |
+| ICE TURN-refresh failure (dedicated) | `on_ice_transport_error` | ❌ not installed |
 | Any `pjmedia_event`, incl. `MEDIA_TP_ERR`, `AUD_DEV_ERROR` | `on_call_media_event` | ✅ — ``CallMediaEvent`` (2026-08-18) |
 | Stream teardown + final statistics | `on_stream_destroyed` | ✅ — `.streamDestroyed` (2026-08-18) |
 | SIP transport up/down | `on_transport_state` | ❌ not installed |
@@ -313,7 +316,7 @@ Therefore:
 |---|---|---|
 | Session timer (RFC 4028) refresh — **refresher** (the UAC) | `PJSUA_SIP_TIMER_OPTIONAL` — negotiated with Flexisip, see §6.3 | ~½ × `Session-Expires` **+ ~83 s** = up to **~983 s (16.4 min)** at the 1800 s default. **Measured: 938 s** |
 | Session timer — **refreshee** (the UAS) | same | `max(SE−32, SE−SE/3)` = **1768 s (~29.5 min)** (`sip_timer.c:523-525`). Not reached in a 1149 s run — the answering leg never noticed |
-| ICE keep-alive | ❌ ICE not enabled ([OH-4](../../offhook/docs/Tech-Debt.md)) | seconds — if it were on |
+| ICE keep-alive | ❌ ICE not enabled ([OH-4](../../offhook/docs/Tech-Debt.md)) | never, even if it were on: the keep-alive to the peer is a Binding Indication, which gets no response (`ice_session.c:1347-1390`); only a TURN-refresh failure is reported |
 | RTP inactivity detection | **does not exist in pjmedia** | never |
 | The user pressing hang up | always | immediately, and badly |
 
@@ -470,8 +473,9 @@ Tracked as [TD-27](./Tech-Debt.md). Ordered by value.
 3. **`on_transport_state`** — SIP transport up/down. Does not tell you which call died (nothing
    does), but it is the earliest signal that anything is wrong, and it is what a reconnect policy
    keys off.
-4. **`on_call_media_transport_state` / `on_ice_transport_error`** — ICE keep-alive failure. Only
-   useful once ICE is enabled, but cheap to wire while the others are being added.
+4. **`on_call_media_transport_state` / `on_ice_transport_error`** — a TURN-refresh failure and a NAT
+   rebinding, once ICE with TURN is enabled. Not a peer-liveness signal (§4), but cheap to wire while
+   the others are being added.
 5. **A regression test for the `hanging_up` ordering** (§2).
 
 All five are notification-only and hold no actor reference, so G2 is unaffected.

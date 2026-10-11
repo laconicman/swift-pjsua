@@ -11,27 +11,46 @@ struct AccountParameters: Sendable {
 
     /// Distinguishes *this* account from a later one that happened to be handed the same
     /// ``AccountID``. pjsua recycles freed ids, so an id alone cannot identify an account
-    /// across a suspension point — see ``PJSUA/reRegister(_:updatingPush:)``.
+    /// across a suspension point — see ``PJSUA/liveParameters(_:generation:)``.
     var generation: UInt64
+
+    /// The push parameters pjsua has now: `config.push` is what the account should have, this is
+    /// what was last applied. A difference means the Contact the binding is registered under
+    /// changes — the engine's own record, so it need not repeat `pjsua_acc_modify`'s field rules.
+    var appliedPush: PushConfiguration?
 }
 
 extension PJSUA {
     // MARK: Accounts
 
-    /// Add a SIP account and start registration.
+    /// Add a SIP account and register it.
     ///
     /// The secret is fetched from `credentials` **before** any engine state is inspected; see the
     /// re-entrancy note on ``addAccount(_:secret:)``.
     ///
+    /// **The engine sends the first REGISTER**, not `pjsua_acc_add`: that one ignores whether its
+    /// send worked (`pjsua_acc.c`), so it is told not to (`register_on_acc_add`). The REGISTER is
+    /// the account's first registration operation, and any other one on the account waits for it.
+    ///
     /// - Parameters:
     ///   - config: everything but the secret (see ``AccountConfiguration``).
-    ///   - credentials: consulted now, and again on ``reRegister(_:updatingPush:)``.
+    ///   - credentials: consulted now, and again on ``reRegister(_:updatingPush:wait:)``.
+    ///   - wait: ``RegistrationWait/confirmed(timeout:)``, the default, returns when the registrar
+    ///     confirms the binding, as ``reRegister(_:updatingPush:wait:)`` does.
+    ///     ``RegistrationWait/dispatched`` returns once the REGISTER is sent.
+    /// - Throws: ``PJSUAUsageError`` or ``PJSUAError`` when the account could not be added. An
+    ///   added account stays whatever its first REGISTER's fate, and the ``RegistrationError`` that
+    ///   reports it names the account.
     @discardableResult
     public func addAccount(_ config: AccountConfiguration,
-                           credentials: CredentialStore) async throws -> AccountID {
-        // The one and only suspension point, taken up front.
+                           credentials: CredentialStore,
+                           wait: RegistrationWait = .confirmed()) async throws -> AccountID {
+        // Taken before the critical section, which has no suspension point.
         let secret = try await credentials.secret(for: config.credentialRequest)
-        return try addAccount(config, secret: secret, credentials: credentials)
+        let account = try addAccount(config, secret: secret, credentials: credentials)
+        // Created in the same actor turn as the account, so it is the account's first operation.
+        try await setRegistration(account, renew: true, wait: wait)
+        return account
     }
 
     /// The critical section: **synchronous by construction**.
@@ -64,6 +83,7 @@ extension PJSUA {
         }
         let rawId = try withAccConfig(config, secret: secret) { cfg -> pjsua_acc_id in
             var accId: pjsua_acc_id = -1 // PJSUA_INVALID_ID
+            cfg.register_on_acc_add = false.pjBool   // the engine registers (see the async add)
             try pjsua_acc_add(&cfg, config.isDefault.pjBool, &accId).throwIfFailed()
             return accId
         }
@@ -71,55 +91,150 @@ extension PJSUA {
         accountGeneration &+= 1
         accountParameters[account] = AccountParameters(config: config,
                                                       credentials: credentials,
-                                                      generation: accountGeneration)
+                                                      generation: accountGeneration,
+                                                      appliedPush: config.push)
+        // Tracked from here; nothing is sent yet.
+        registration.sessions[account] = .unregistered
         return account
     }
 
-    /// Toggle registration for an account (REGISTER / un-REGISTER).
-    public func setRegistration(_ account: AccountID, renew: Bool) throws {
-        try pjsua_acc_set_registration(account.raw, renew.pjBool).throwIfFailed()
-    }
-
-    /// Remove an account: un-REGISTERs (best effort), deletes it from pjsua, and frees its
-    /// slot in the fixed account table (`pjsua_acc_del` — see ``addAccount(_:credentials:)``).
-    /// Any calls still using the account are unaffected at the SIP-dialog level but can no
-    /// longer authenticate re-INVITEs; hang up first.
+    /// REGISTER (`renew`) or un-REGISTER an account, as it is configured now.
     ///
-    /// - Important: pjsua **recycles** freed ids — a later `addAccount` may return this same
-    ///   ``AccountID``. Consumers keeping per-account state keyed by id must drop it here.
-    public func removeAccount(_ account: AccountID) throws {
-        try pjsua_acc_del(account.raw).throwIfFailed()
-        accountParameters[account] = nil
-    }
-
-    /// Re-REGISTER an account, optionally replacing its push parameters first.
+    /// **A registration operation**: it waits for any REGISTER or un-REGISTER already in flight on
+    /// the account to settle, and for any ``handleIPChange(wait:)`` to complete, never fires into
+    /// them. An un-REGISTER of an account that is not registered throws as pjsua refuses it, after
+    /// pjsua has cancelled any automatic retry of a failed REGISTER.
     ///
-    /// Designed for the silent-push "re-REGISTER with updated config" path: it rebuilds the
-    /// account config from the stored ``AccountConfiguration`` and a **freshly fetched** secret,
-    /// applies it via `pjsua_acc_modify`, then renews registration. Independent of the VoIP-push
-    /// answer path and of lifecycle events — it only mutates this account's config and
-    /// registration.
-    ///
-    /// - Parameter push: new push parameters, or `nil` to keep the current ones.
-    public func reRegister(_ account: AccountID, updatingPush push: PushConfiguration? = nil) async throws {
-        guard var params = accountParameters[account] else {
+    /// - Parameter wait: ``RegistrationWait/confirmed(timeout:)``, the default, returns when the
+    ///   registrar answers: for a REGISTER, a confirmed binding, as for
+    ///   ``reRegister(_:updatingPush:wait:)``. ``RegistrationWait/dispatched`` returns once the
+    ///   request is sent.
+    /// - Throws: ``RegistrationError``, or ``PJSUAUsageError/unknownAccount(_:)`` or
+    ///   ``PJSUAUsageError/accountReplaced(_:)`` when the account went away meanwhile.
+    public func setRegistration(_ account: AccountID,
+                                renew: Bool,
+                                wait: RegistrationWait = .confirmed()) async throws {
+        guard let params = accountParameters[account] else {
             throw PJSUAUsageError.unknownAccount(account)
         }
-        if let push { params.config.push = push }
-        // Suspension point first, then the synchronous tail (same rule as addAccount).
-        let secret = try await params.credentials.secret(for: params.config.credentialRequest)
-        try reRegister(account, params: params, secret: secret)
+        let generation = params.generation
+        try await performRegistration(.account(account), wait: wait) { engine, operation in
+            try await engine.registrationSteps(account, renew: renew,
+                                               generation: generation, operation: operation)
+        }
     }
 
-    /// Synchronous tail of ``reRegister(_:updatingPush:)`` — see the note on
-    /// ``addAccount(_:secret:credentials:)``.
+    private func registrationSteps(_ account: AccountID,
+                                   renew: Bool,
+                                   generation: UInt64,
+                                   operation: UInt64) async throws {
+        let mailbox = openRegistrationMailbox(for: account)
+        defer { closeRegistrationMailbox(mailbox) }
+        while true {
+            try await awaitQuietRegistration(account, generation: generation, mailbox: mailbox)
+            // Synchronous from this reading to the send: the push parameters pjsua has applied.
+            let push = try liveParameters(account, generation: generation).appliedPush
+            guard let answer = try await exchangeRegistration(account, renew: renew,
+                                                              generation: generation,
+                                                              mailbox: mailbox,
+                                                              operation: operation)
+            else { continue }
+            try confirmRegistration(answer, of: account, push: push)
+            return
+        }
+    }
+
+    /// Remove an account: un-REGISTER its binding and have the registrar answer, then delete it
+    /// from pjsua and free its slot in the fixed account table (`pjsua_acc_del` — see
+    /// ``addAccount(_:credentials:wait:)``).
     ///
-    /// **Re-validates by generation, not by presence.** Fetching the secret suspends, and the
-    /// actor is re-entrant across that suspension: another call can `removeAccount` and then
+    /// **A registration operation**: it waits for any REGISTER already in flight on the account to
+    /// settle, never fires into it. `pjsua_acc_del` alone sends its un-REGISTER and destroys the
+    /// session at once. With a REGISTER in flight the un-REGISTER is refused and the REGISTER
+    /// orphaned, and pjsip answers a 401 on the orphan with the session's own credentials: the
+    /// registrar would keep a binding, push parameters and all, for an account that no longer
+    /// exists. Here the un-REGISTER is answered first, so pjsua finds no session left to delete and
+    /// sends nothing more.
+    ///
+    /// The account is removed whatever the registrar answers. A failed un-REGISTER then throws
+    /// ``RegistrationError/rejected(_:statusCode:)`` all the same, because the registrar may keep
+    /// the binding until it expires. When pjsua reports nothing within the engine's backstop, the
+    /// call throws ``RegistrationError/timedOut(_:)`` and the account stays, to be removed again.
+    ///
+    /// Calls still using the account are unaffected at the SIP-dialog level but can no longer
+    /// authenticate re-INVITEs; hang up first.
+    ///
+    /// - Parameter wait: ``RegistrationWait/dispatched`` returns once the un-REGISTER is sent (or
+    ///   at once, for an account with nothing to un-REGISTER); the account is deleted when it is
+    ///   answered.
+    /// - Important: pjsua **recycles** freed ids — a later `addAccount` may return this same
+    ///   ``AccountID``. Consumers keeping per-account state keyed by id must drop it here.
+    public func removeAccount(_ account: AccountID, wait: RegistrationWait = .confirmed()) async throws {
+        guard let params = accountParameters[account] else {
+            throw PJSUAUsageError.unknownAccount(account)
+        }
+        let generation = params.generation
+        try await performRegistration(.account(account), wait: wait) { engine, operation in
+            try await engine.removeAccountSteps(account, generation: generation, operation: operation)
+        }
+    }
+
+    private func removeAccountSteps(_ account: AccountID,
+                                    generation: UInt64,
+                                    operation: UInt64) async throws {
+        let mailbox = openRegistrationMailbox(for: account)
+        defer { closeRegistrationMailbox(mailbox) }
+        var answer: RegistrationSettlement?
+        while true {
+            try await awaitQuietRegistration(account, generation: generation, mailbox: mailbox)
+            // Synchronous from this reading on: the session is quiet.
+            guard case .registered = registration.sessions[account], answer == nil else { break }
+            guard let settled = try await exchangeRegistration(account, renew: false,
+                                                               generation: generation,
+                                                               mailbox: mailbox,
+                                                               operation: operation)
+            else { continue }
+            answer = settled
+            // Back to a quiet reading before deleting: pjsua may start a REGISTER of its own after
+            // a failed un-REGISTER (its retry block does not exclude them).
+        }
+        _ = try liveParameters(account, generation: generation)
+        try pjsua_acc_del(account.raw).throwIfFailed()
+        accountParameters[account] = nil
+        registration.sessions[account] = nil
+        markRegistrationDispatched(operation)
+        if let answer {
+            try confirmRegistration(answer, of: account, push: nil)
+        }
+    }
+
+    /// The stored parameters of `account`, provided it is still the account `generation` was
+    /// stamped on: pjsua recycles freed ids, so presence alone proves nothing across a suspension.
+    func liveParameters(_ account: AccountID, generation: UInt64) throws -> AccountParameters {
+        guard let live = accountParameters[account] else {
+            throw PJSUAUsageError.unknownAccount(account)
+        }
+        guard live.generation == generation else {
+            throw PJSUAUsageError.accountReplaced(account)
+        }
+        return live
+    }
+
+    /// Apply the stored parameters to the live account with `pjsua_acc_modify`, telling it not to
+    /// register by itself (`disable_reg_on_modify`), and return the push parameters applied. The
+    /// config step of ``reRegister(_:updatingPush:wait:)``, run from a quiet session.
+    ///
+    /// **The caller owns the re-registration.** It un-REGISTERs first when the Contact changes, and
+    /// registers straight after this returns, in the same synchronous step: the condition under
+    /// which TD-21 allows the flag. pjsua still decides what the change means for the session — a
+    /// changed credential or Contact makes it discard the session, so the caller's REGISTER goes
+    /// out on a fresh one — so the engine repeats none of `pjsua_acc_modify`'s field rules.
+    ///
+    /// **Re-validates by generation, not by presence.** The operation suspends before this, and the
+    /// actor is re-entrant across a suspension: another call can `removeAccount` and then
     /// `addAccount` in the gap. pjsua recycles freed ids, so the new account can be handed the
-    /// *same* ``AccountID`` — a `!= nil` check would pass and we would then apply this call's
-    /// credential and push parameters to somebody else's account, and overwrite their stored
-    /// parameters with ours. Comparing the generation stamped at add time closes that window.
+    /// *same* ``AccountID`` — a `!= nil` check would pass and we would apply this account's
+    /// credential and push parameters to somebody else's account.
     ///
     /// **Read-modify-write, never rebuild.** `pjsua_acc_modify` diffs the struct it is handed
     /// against the *live* config, so passing a freshly-defaulted one silently resets everything
@@ -128,18 +243,13 @@ extension PJSUA {
     /// `rtp_cfg.port` (which also zeroes `next_rtp_port`), and `ice_cfg_use`/`turn_cfg_use`.
     /// We therefore fetch the live config with `pjsua_acc_get_config` into a scratch pool and
     /// overwrite only the fields we own. This is the pattern pjsua's own app and tests use.
-    private func reRegister(_ account: AccountID,
-                            params: AccountParameters,
-                            secret: String) throws {
-        guard let live = accountParameters[account] else {
-            throw PJSUAUsageError.unknownAccount(account)
-        }
-        guard live.generation == params.generation else {
-            throw PJSUAUsageError.accountReplaced(account)
-        }
+    func applyStoredConfiguration(_ account: AccountID,
+                                  generation: UInt64,
+                                  secret: String) throws -> PushConfiguration? {
+        var params = try liveParameters(account, generation: generation)
         guard let pool = pjsua_pool_create("swift-pjsua.accmod", 1024, 1024) else {
-            // Not "unknown account" — the guard above already proved it exists. This is an
-            // allocation failure, which is transient and worth retrying.
+            // Not "unknown account" — the check above proved it exists. This is an allocation
+            // failure, which is transient and worth retrying.
             throw PJSUAUsageError.poolAllocationFailed
         }
         defer { pj_pool_release(pool) }
@@ -149,15 +259,13 @@ extension PJSUA {
 
         // Only the fields we own; everything else stays as pjsua has it.
         let owners = applyOwnedFields(to: &acc, config: params.config, secret: secret)
-
-        _ = try withExtendedLifetime(owners) {
-            // A changed credential makes pjsua unregister the old binding and re-REGISTER.
-            // If that re-registration fails the account stays unregistered and the config is
-            // NOT rolled back (documented pjsua_acc_modify behaviour).
-            try pjsua_acc_modify(account.raw, &acc).throwIfFailed()
+        acc.disable_reg_on_modify = true.pjBool
+        try withExtendedLifetime(owners) {
+            _ = try pjsua_acc_modify(account.raw, &acc).throwIfFailed()
         }
-        accountParameters[account] = params   // same generation; only config/push may have changed
-        try pjsua_acc_set_registration(account.raw, true.pjBool).throwIfFailed()
+        params.appliedPush = params.config.push
+        accountParameters[account] = params
+        return params.config.push
     }
 
     // MARK: Config building

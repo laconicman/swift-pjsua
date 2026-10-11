@@ -38,6 +38,13 @@ public actor PJSUA {
     /// so an idle engine produces nothing.
     public nonisolated let callEvents: AsyncStream<PJSUAEvent>
 
+    /// The engine's own registration channel: what the callbacks report about registrations,
+    /// read by a task on this actor from ``start(_:)`` on. See `PJSUA+RegistrationLifecycle.swift`.
+    nonisolated let registrationSignals: AsyncStream<RegistrationSignal>
+
+    /// Registration bookkeeping, kept from this actor's own calls and from `registrationSignals`.
+    var registration = RegistrationLifecycle()
+
     enum State { case idle, running, stopped }
     private(set) var state: State = .idle
 
@@ -46,7 +53,7 @@ public actor PJSUA {
     /// gate engine calls on it rather than trusting event ordering at shutdown boundaries.
     public var isRunning: Bool { state == .running }
 
-    /// Parameters of accounts added via ``addAccount(_:credentials:)``, kept so a silent-push
+    /// Parameters of accounts added via ``addAccount(_:credentials:wait:)``, kept so a silent-push
     /// re-REGISTER can re-apply the fields we own on top of pjsua's live config. See
     /// `PJSUA+Accounts.swift`.
     var accountParameters: [AccountID: AccountParameters] = [:]
@@ -127,6 +134,7 @@ public actor PJSUA {
         let streams = makePJSUAEventStreams()
         self.events = streams.events
         self.callEvents = streams.callEvents
+        self.registrationSignals = streams.registrationSignals
         self.executor = PJSIPExecutor()
     }
 
@@ -134,8 +142,11 @@ public actor PJSUA {
 
     /// Create → init → start PJSUA. Runs on the executor thread; `pjsua_create()` makes
     /// that thread PJLIB's registered main thread, so all subsequent calls are safe.
+    ///
+    /// A start that throws leaves the engine as it found it, so it can be started again once the
+    /// cause is gone: a port another app holds, for instance.
     public func start(_ config: Configuration = .init()) throws {
-        precondition(state == .idle, "PJSUA.start() must be called exactly once")
+        precondition(state == .idle, "PJSUA.start() succeeds once; only a failed start may be retried")
 
         // 1. create — initializes PJLIB; THIS thread becomes the registered main thread.
         try pjsua_create().throwIfFailed()
@@ -243,12 +254,25 @@ public actor PJSUA {
             // 4. go
             try pjsua_start().throwIfFailed()
         } catch {
+            // Once `pjsua_create()` has succeeded, pjsua must be destroyed (`pjsua.h`), and its own
+            // sample does so when start fails. Left half built, the next start would create it over
+            // the remains, and the transport map would still name the dead transports.
+            pjsua_destroy()
+            transportIDs.removeAll()
             // A failed start must not leave the tap installed: `shutdown()` only clears it
             // on the running path, so a throw here would leak the sink into the next start.
             pjsuaLogSink = nil
             throw error
         }
         state = .running
+
+        // Apply the registration signals in this actor's turns for the engine's whole life; the
+        // loop ends when `shutdown` finishes the stream.
+        Task { [weak self, registrationSignals] in
+            for await signal in registrationSignals {
+                await self?.applyRegistrationSignal(signal)
+            }
+        }
     }
 
     /// Destroy PJSUA (on the executor thread) and stop the executor thread.
@@ -262,6 +286,7 @@ public actor PJSUA {
         transportIDs.removeAll()
         pjsuaLogSink = nil // worker threads are gone — safe to clear the process-global tap
         accountParameters.removeAll()
+        stopRegistrationLifecycle() // after the accounts are gone: each waiter finds its own gone
         finishPJSUAEventStreams()
         executor.stop()
     }
@@ -274,14 +299,51 @@ public actor PJSUA {
     /// re-REGISTERs with the rewritten contact (`allow_contact_rewrite`) and re-INVITEs
     /// in-progress calls (UPDATE where the peer advertises it).
     ///
-    /// Progress arrives as ``PJSUAEvent/ipChangeProgress`` ending in `.completed`. Safe to
-    /// call repeatedly — pjsua detects a handling sequence already in progress and skips
-    /// re-entering it. During the sequence pjsua ignores request timeouts
-    /// (`keep_inv_after_tsx_timeout`), so calls survive the flap rather than dying on it.
-    public func handleIPChange() throws {
+    /// Progress arrives as ``PJSUAEvent/ipChangeProgress`` ending in `.completed`. During the
+    /// sequence pjsua ignores request timeouts (`keep_inv_after_tsx_timeout`), so calls survive
+    /// the flap rather than dying on it.
+    ///
+    /// **A registration operation over every account**: it starts once no other registration
+    /// operation runs and no account's registration is busy, and no account operation starts
+    /// until pjsua reports the sequence complete. pjsua itself would run a second sequence over
+    /// one still in progress ("Previous IP address change handling still in progress",
+    /// `pjsua_core.c`). Requests coalesce: one made while an IP change runs is queued, and later
+    /// ones join it, so one more sequence follows the running one.
+    ///
+    /// - Parameter wait: ``RegistrationWait/confirmed(timeout:)``, the default, returns when the
+    ///   sequence completes; ``RegistrationWait/dispatched`` once pjsua has started it.
+    /// - Throws: ``PJSUAError`` when pjsua refuses to start the sequence;
+    ///   ``RegistrationError/ipChangeTimedOut`` when it does not complete in time, after which
+    ///   account operations resume.
+    public func handleIPChange(wait: RegistrationWait = .confirmed()) async throws {
         precondition(state == .running, "start() must complete before handleIPChange()")
+        try await performRegistration(.all, joining: .ipChange, wait: wait) { engine, operation in
+            try await engine.ipChangeSteps(operation: operation)
+        }
+    }
+
+    private func ipChangeSteps(operation: UInt64) async throws {
+        let mailbox = openRegistrationMailbox(for: nil)
+        defer { closeRegistrationMailbox(mailbox) }
+        await awaitQuietRegistrations(mailbox: mailbox)
+        guard !registration.stopped else { throw CancellationError() }
+
+        // A `COMPLETED` already applied belongs to an earlier sequence, not to this one.
+        discardRegistrationSignals(in: mailbox)
         var param = pjsua_ip_change_param()
         pjsua_ip_change_param_default(&param) // NULL param is a hard assert, not "defaults"
         try pjsua_handle_ip_change(&param).throwIfFailed()
+        markRegistrationDispatched(operation)
+
+        let deadline = ContinuousClock.now + Self.registrationBackstop
+        while true {
+            guard let signal = await nextRegistrationSignal(in: mailbox, before: deadline) else {
+                guard !registration.stopped else { throw CancellationError() }
+                pjLog(2, "IP change not reported complete after \(Self.registrationBackstop); "
+                         + "registration operations resume")
+                throw RegistrationError.ipChangeTimedOut
+            }
+            if case .ipChangeCompleted = signal { return }
+        }
     }
 }

@@ -51,7 +51,7 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
     /// registration, so when it expires the server drops the binding, and with it the push
     /// target. The registrar may grant less than asked (Flexisip caps it at `max-expires`).
     ///
-    /// Applied when the account is added; ``PJSUA/reRegister(_:updatingPush:)`` keeps the live
+    /// Applied when the account is added; ``PJSUA/reRegister(_:updatingPush:wait:)`` keeps the live
     /// value.
     public var registrationTimeout: UInt32?
 

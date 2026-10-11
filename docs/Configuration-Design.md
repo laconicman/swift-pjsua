@@ -239,8 +239,9 @@ tests use. The pre-existing comment claiming `get_config` was "fragile" was wron
 - **Pinning a UDP transport disables the RFC 3261 §18.1.1 size upgrade** and thereby re-creates
   pjsip/pjproject#5075 — the upgrade inserts TCP candidates the UDP pin cannot acquire, so the
   oversized request fragments. Pinning TCP is safe (listener selector); `nil` stays the default.
-- Rotating the secret on `modify` triggers unregister + re-REGISTER; a failed re-registration
-  leaves the account unregistered with **no config rollback**.
+- Rotating the secret makes `modify` discard the session, and the engine's REGISTER then
+  authenticates anew on a fresh one (D-CONFIG-5); a refused one leaves the account unregistered
+  with **no config rollback**.
 
 **Misuse sweep (2026-07-17) — the rest of the config surface is clean.** Having found D-CONFIG-4,
 we swept every pjsua config struct the wrapper touches for the same "fresh default into a
@@ -261,6 +262,18 @@ reason D-CONFIG-4 had to be fixed before, not after, that feature.
 
 Reviews archived in `VoIP/deepwiki-store/` (pre-implementation `…_b5a757a3`, post-implementation
 follow-up on the same thread, misuse sweep `…_bb8d7a19`).
+
+**D-CONFIG-5 — the engine sends the registration a config change needs.** *Added 2026-10-11 with
+the registration lifecycle.* `pjsua_acc_add` runs with `register_on_acc_add` off and
+`pjsua_acc_modify` with `disable_reg_on_modify` on; the engine sends the REGISTER itself, from a
+quiet session, as a registration operation that returns on the registrar's answer. `pjsua_acc_add`
+ignores whether its own send worked, and modify sends its un-REGISTER and REGISTER back to back on
+two sessions. What a change means for the session stays pjsua's decision — modify still discards
+it for a changed credential or Contact. The engine adds one rule of its own: when the push
+parameters, and with them the Contact, change on a registered account, the old binding is
+un-REGISTERed and answered first. It decides that from its record of the push parameters last
+applied (`appliedPush`), not by repeating modify's field comparisons. TD-21 states the condition
+the flag is set under; `Registration-Lifecycle.md` has the sequence.
 
 ## 7. Sequencing
 

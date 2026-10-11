@@ -58,7 +58,7 @@ public enum PJSUAEvent: Sendable {
     /// *transferee* side of an attended transfer. `newCall` is the call that took over.
     case callReplaced(call: CallID, newCall: CallID)
 
-    /// One step of ``PJSUA/handleIPChange()`` (`on_ip_change_progress`). `status` is the
+    /// One step of ``PJSUA/handleIPChange(wait:)`` (`on_ip_change_progress`). `status` is the
     /// step's `pj_status_t` (0 = success). Which identifier payload is set depends on
     /// ``IPChangeOperation``: `transportID` for `.restartListener`, `account` for the
     /// account steps, `call` alongside it for the two call steps.

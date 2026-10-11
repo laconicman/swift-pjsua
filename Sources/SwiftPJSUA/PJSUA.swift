@@ -291,17 +291,49 @@ public actor PJSUA {
     /// re-REGISTERs with the rewritten contact (`allow_contact_rewrite`) and re-INVITEs
     /// in-progress calls (UPDATE where the peer advertises it).
     ///
-    /// Progress arrives as ``PJSUAEvent/ipChangeProgress`` ending in `.completed`. Safe to
-    /// call repeatedly — pjsua detects a handling sequence already in progress and skips
-    /// re-entering it. During the sequence pjsua ignores request timeouts
-    /// (`keep_inv_after_tsx_timeout`), so calls survive the flap rather than dying on it.
-    public func handleIPChange() throws {
+    /// Progress arrives as ``PJSUAEvent/ipChangeProgress`` ending in `.completed`. During the
+    /// sequence pjsua ignores request timeouts (`keep_inv_after_tsx_timeout`), so calls survive
+    /// the flap rather than dying on it.
+    ///
+    /// **A registration operation over every account**: it starts once no other registration
+    /// operation runs and no account's registration is busy, and no account operation starts
+    /// until pjsua reports the sequence complete. pjsua itself would run a second sequence over
+    /// one still in progress ("Previous IP address change handling still in progress",
+    /// `pjsua_core.c`). Requests coalesce: one made while an IP change runs is queued, and later
+    /// ones join it, so one more sequence follows the running one.
+    ///
+    /// - Parameter wait: ``RegistrationWait/confirmed(timeout:)``, the default, returns when the
+    ///   sequence completes; ``RegistrationWait/dispatched`` once pjsua has started it.
+    /// - Throws: ``PJSUAError`` when pjsua refuses to start the sequence;
+    ///   ``RegistrationError/ipChangeTimedOut`` when it does not complete in time, after which
+    ///   account operations resume.
+    public func handleIPChange(wait: RegistrationWait = .confirmed()) async throws {
         precondition(state == .running, "start() must complete before handleIPChange()")
+        try await performRegistration(.all, joining: .ipChange, wait: wait) { engine, operation in
+            try await engine.ipChangeSteps(operation: operation)
+        }
+    }
+
+    private func ipChangeSteps(operation: UInt64) async throws {
+        let mailbox = openRegistrationMailbox(for: nil)
+        defer { closeRegistrationMailbox(mailbox) }
+        await awaitQuietRegistrations(mailbox: mailbox)
+        guard !registration.stopped else { throw CancellationError() }
+
         var param = pjsua_ip_change_param()
         pjsua_ip_change_param_default(&param) // NULL param is a hard assert, not "defaults"
         try pjsua_handle_ip_change(&param).throwIfFailed()
-        // pjsua re-registers the accounts itself until the sequence reports `.completed`;
-        // registration operations stay out until then.
-        registration.ipChangeRunning = true
+        markRegistrationDispatched(operation)
+
+        let deadline = ContinuousClock.now + Self.registrationBackstop
+        while true {
+            guard let signal = await nextRegistrationSignal(in: mailbox, before: deadline) else {
+                guard !registration.stopped else { throw CancellationError() }
+                pjLog(2, "IP change not reported complete after \(Self.registrationBackstop); "
+                         + "registration operations resume")
+                throw RegistrationError.ipChangeTimedOut
+            }
+            if case .ipChangeCompleted = signal { return }
+        }
     }
 }

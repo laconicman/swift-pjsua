@@ -525,7 +525,7 @@ private func pjsuaOnIPChangeProgress(_ op: pjsua_ip_change_op,
         call = info.map { CallID($0.pointee.acc_reinvite_calls.call_id) }
     case PJSUA_IP_CHANGE_OP_COMPLETED:
         operation = .completed
-        // The engine holds account registrations still while the sequence runs.
+        // Ends the engine's IP-change operation, which holds every account's registration still.
         pjsuaRegistrationSink?.yield(.ipChangeCompleted)
     default:
         operation = .unknown

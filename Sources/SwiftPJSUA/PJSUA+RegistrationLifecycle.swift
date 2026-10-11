@@ -180,7 +180,7 @@ extension PJSUA {
                     : .unregistered
             }
         case .ipChangeCompleted:
-            registration.ipChangeRunning = false
+            break   // for the IP-change operation's mailbox
         }
         for (id, mailbox) in registration.mailboxes
         where mailbox.account.map(signal.concerns) ?? true {
@@ -196,7 +196,6 @@ extension PJSUA {
     func stopRegistrationLifecycle() {
         registration.stopped = true
         registration.sessions.removeAll()
-        registration.ipChangeRunning = false
         for id in registration.mailboxes.keys {
             resumeRegistrationMailbox(id, with: nil)
         }
@@ -254,9 +253,8 @@ extension PJSUA {
     // MARK: Quiet, and waiting for it
 
     /// Whether the engine may touch `account`'s registration now: no transaction in flight, no
-    /// refresh about to leave, no IP change running.
+    /// refresh about to leave. (No IP change runs meanwhile: it holds a turn over every account.)
     func isQuietRegistration(_ account: AccountID) -> Bool {
-        guard !registration.ipChangeRunning else { return false }
         switch registration.sessions[account] ?? .unregistered {
         case .unregistered: return true
         case .pending: return false
@@ -281,6 +279,22 @@ extension PJSUA {
                 resyncRegistration(account)
                 if isQuietRegistration(account) { return }
                 throw RegistrationError.timedOut(account)
+            }
+        }
+    }
+
+    /// Suspend until no account's registration is busy, for an IP change. On the backstop it goes
+    /// on regardless: the network change may be what stalled a transaction, and pjsua's IP-change
+    /// sequence rebuilds a session it finds busy (`pjsua_acc_update_contact_on_ip_change`).
+    func awaitQuietRegistrations(mailbox: UInt64) async {
+        let deadline = ContinuousClock.now + Self.registrationBackstop
+        while let busy = registration.sessions.keys.first(where: { !isQuietRegistration($0) }) {
+            if await nextRegistrationSignal(in: mailbox, before: deadline) == nil {
+                if !registration.stopped {
+                    pjLog(3, "Acc \(busy.raw): registration still busy after "
+                             + "\(Self.registrationBackstop); handling the IP change regardless")
+                }
+                return
             }
         }
     }

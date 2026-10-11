@@ -26,10 +26,6 @@ struct RegistrationLifecycle {
     /// Sessions of the accounts the engine added; signals for others are ignored.
     var sessions: [AccountID: Session] = [:]
 
-    /// From a successful `pjsua_handle_ip_change` until its sequence reports `COMPLETED`. pjsua
-    /// re-registers the accounts itself meanwhile.
-    var ipChangeRunning = false
-
     /// Set by ``PJSUA/shutdown()``: no signal comes any more, so nothing may wait for one.
     var stopped = false
 
@@ -46,7 +42,8 @@ struct RegistrationLifecycle {
     /// What an operation needs to itself.
     enum Scope: Equatable {
         case account(AccountID)
-        /// Every account: an IP change.
+        /// Every account: an IP change, which holds its turn until pjsua reports the sequence
+        /// `COMPLETED`, so no account operation runs while pjsua re-registers the accounts.
         case all
 
         func conflicts(with other: Scope) -> Bool {

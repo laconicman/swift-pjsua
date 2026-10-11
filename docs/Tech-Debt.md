@@ -28,18 +28,37 @@ knowledge). Until then, `Package.resolved` is the only thing pinning the revisio
   where the binary itself is untouched can resolve under us (see the pin's comment in
   `Package.swift`).
 
-## TD-2 — push payload schemas are placeholders · open
-Both push entry points parse a **placeholder** schema that must be matched to the real server
-contract before shipping:
-- VoIP (`VoIPPushHandler.pushRegistry(_:didReceiveIncomingPushWith:for:)`): `call_uuid`,
-  `sip_call_id`, `from`.
-- Silent (`VoIPPushHandler.handleSilentPush(_:account:updatingPush:)`): `action == "reregister"`.
+## TD-2 — push payload schemas · VoIP resolved (Flexisip); silent still a placeholder · open
+- VoIP (`VoIPPushHandler.pushRegistry(_:didReceiveIncomingPushWith:for:)`) is no longer a
+  placeholder. `VoIPPushPayload` reads Flexisip's `AppleRequest` (2.6.2): `aps.call-id`, then
+  `display-name` or `from-uri`. The placeholder `sip_call_id` and `from` stay as a fallback. Its
+  `call_uuid` is no longer read (TD-30).
+- Silent (`VoIPPushHandler.handleSilentPush(_:account:updatingPush:)`): `action == "reregister"`
+  is still a placeholder, to be matched to a real server before shipping.
 
-The dedup logic that consumes them (`CallIdentity` / `CallRegistry`) is real; only the field names
-are provisional. A server UUID in the VoIP payload is preferred over the `Call-ID` UUIDv5 fallback
-(see roadmap §6.5), so the payload contract directly affects no-double-ring correctness.
+The dedup logic that consumes them (`CallIdentity` / `CallRegistry`) is real, and the push and
+the INVITE agree on a call through the UUIDv5 of its `Call-ID`.
 - Refs: RFC 8599 <https://www.rfc-editor.org/rfc/rfc8599>; PushKit
   <https://developer.apple.com/documentation/pushkit/pkpushregistrydelegate>.
+
+## TD-30 — a server-supplied call UUID would ring twice · open (latent)
+`CallIdentity.uuid(serverProvided:sipCallID:)` prefers a server UUID, and `CallRegistry` is keyed
+by UUID alone. So a push carrying a server UUID X for Call-ID C is reported under X. The INVITE
+that follows carries no server UUID: it derives UUIDv5(C), finds no entry, and reports a second
+call. `firstSeen` merges identifiers only after the same UUID has already been found.
+
+Nothing sends a server UUID today; Flexisip doesn't. So `VoIPPushPayload` stopped reading the
+placeholder `call_uuid`. The public `CallKitController.reportIncomingCall(serverUUID:…)` still
+accepts one, though, and passing it re-opens the bug.
+
+**Fix, when a server that supplies call UUIDs appears:**
+- index `CallRegistry` by SIP `Call-ID` as well as by UUID;
+- have `reportIncomingCall` look up an existing entry by Call-ID before deriving a UUID, so the
+  INVITE joins the push's entry under X;
+- pin it with a test: push (X, C), then INVITE (nil, C), reports once.
+
+Found by a DeepWiki pre-PR review 2026-10-06 and confirmed in `CallSessionRouter.reportIncomingCall`
+and `CallRegistry.firstSeen`.
 
 ## TD-3 — event-stream buffering · resolved (two channels)
 `makePJSUAEventStream()` used `AsyncStream` `.bufferingNewest(64)`, which discarded the **oldest**

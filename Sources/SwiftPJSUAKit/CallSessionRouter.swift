@@ -154,7 +154,8 @@ public actor CallSessionRouter {
     /// orphaned push is withdrawn within roughly one TTL of arriving.
     private static let sweepInterval: Duration = .seconds(15)
 
-    private static let logger = Logger(subsystem: "SwiftPJSUAKit", category: "CallSessionRouter")
+    private static let logger = Logger(subsystem: "io.github.laconicman.SwiftPJSUAKit",
+                                       category: "CallSessionRouter")
 
     public init(engine: PJSUA, provider: CXProvider, registry: CallRegistry = CallRegistry()) {
         self.engine = engine
@@ -241,7 +242,10 @@ public actor CallSessionRouter {
         if let call { uuidByCall[call] = uuid }
 
         let isNew = await registry.firstSeen(uuid: uuid, sipCallID: sipCallID, call: call)
-        guard isNew else { return uuid }
+        guard isNew else {
+            Self.logger.notice("call \(uuid, privacy: .public) already reported to CallKit")
+            return uuid
+        }
 
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: handle)

@@ -376,8 +376,8 @@ config + `reRegister` seam (§6.4); and `SwiftPJSUAKit` skeletons — `CallKitCo
 - **Silent-push → `reRegister`.** `VoIPPushHandler.handleSilentPush(_:account:updatingPush:)` — the
   non-PushKit entry point the app forwards background pushes to (§6.4).
 
-What remains for M1 is the breadth below: AVAudioSession category config and the real push payload
-contract. **PR-b** added the video surface and conference primitives (now shipped — Milestone 3).
+What remains for M1 is the breadth below: AVAudioSession category config and the silent-push
+payload contract (the VoIP one is Flexisip's, TD-2). **PR-b** added the video surface and conference primitives (now shipped — Milestone 3).
 
 - **AVAudioSession + audio path.** `conf_connect` on media-active in `pjsuaOnCallMediaState` now
   iterates `media[]` and bridges every active audio slot (D1 done). Still to do: configure
@@ -391,8 +391,8 @@ contract. **PR-b** added the video surface and conference primitives (now shippe
   `makeCall` returns. `CXSetGroupCallAction` (grouping) shipped in PR-b (Milestone 3). Docs:
   <https://developer.apple.com/documentation/callkit/cxprovider>;
   <https://developer.apple.com/documentation/callkit/cxproviderdelegate>.
-- **PushKit (the contract that terminates your app if you get it wrong).** `VoIPPushHandler` is a
-  skeleton (payload schema is a placeholder). Register a
+- **PushKit (the contract that terminates your app if you get it wrong).** `VoIPPushHandler` reads
+  Flexisip's VoIP payload (TD-2). Register a
   `PKPushRegistry` for `.voIP`; declare the VoIP background mode in `Info.plist`. The handler
   adopts the **`async` variant** `pushRegistry(_:didReceiveIncomingPushWith:for:) async`
   (iOS 11+, modern API at our iOS 17 floor) instead of the completion-handler form; it
@@ -461,7 +461,10 @@ contract. **PR-b** added the video surface and conference primitives (now shippe
 - **Ergonomics via codegen:** use [`swift-pjsip-gen`](https://github.com/laconicman/swift-pjsip-gen)
   to generate typed facades and `CustomStringConvertible` for the pjsua structs — this is the
   pjsua1 answer to "PJSUA2 automates more."
-- **Logging:** route PJSIP logs to OSLog (a log callback or generated helper); the
+- **Logging:** the engine exposes pjsip's log through `PJSUA.Configuration.logSink` (the
+  log callback) and stops there. Routing those lines to OSLog, mapping pjsip levels to log types,
+  choosing privacy and any file are the host app's policy, so the engine has no `Logger` of its
+  own. The Kit logs its own decisions under `io.github.laconicman.SwiftPJSUAKit`. The
   `#fileID`/`#line` timer wrapper is in `PJ+ScheduleTimer.swift`.
 - **Privacy manifest:** PJSIP touches a required-reason API (system boot time for its
   timers); declare it in the **app's** `PrivacyInfo.xcprivacy` (the binary can't carry one).

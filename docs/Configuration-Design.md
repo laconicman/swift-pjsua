@@ -91,6 +91,9 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
     public var registrationProxyUse: RegistrationProxyUse = .both
 
     public var push: PushConfiguration?
+    /// Seconds each REGISTER asks for → `acc_config.reg_timeout` (nil = pjsua's 300). Set on add
+    /// only; long for push-woken apps, whose suspended refresh timer cannot keep a binding alive.
+    public var registrationTimeout: UInt32?
     public var isDefault: Bool = true
     // Deliberately NO password — see Layer B.
     // ⏳ TD-14: per-account `ice`/`turn` overrides (nil = inherit `Configuration.media`)

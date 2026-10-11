@@ -12,16 +12,17 @@ import SwiftPJSUA
 ///   is forwarded to ``handleSilentPush(_:account:updatingPush:)`` to re-REGISTER with updated
 ///   push parameters (``PJSUA/reRegister(_:updatingPush:)``).
 ///
-/// - Important: **Skeleton.** The payload schemas (`call_uuid` / `sip_call_id` / `from` for VoIP;
-///   `action == "reregister"` for silent) are placeholders to be matched to the real server
-///   contract, and the app still owns the `PKPushRegistry` instance and its registration.
+/// The VoIP payload contract is Flexisip's (see ``VoIPPushPayload``). The silent-push schema
+/// (`action == "reregister"`) is still a placeholder to be matched to a real server, and the app
+/// owns the `PKPushRegistry` instance and its registration.
 ///
 /// - SeeAlso: Responding to VoIP Notifications from PushKit
 ///   (<https://developer.apple.com/documentation/PushKit/responding-to-voip-notifications-from-pushkit>);
 ///   Pushing background updates to your App
 ///   (<https://developer.apple.com/documentation/usernotifications/pushing-background-updates-to-your-app>).
 public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
-    private static let logger = Logger(subsystem: "SwiftPJSUAKit", category: "VoIPPushHandler")
+    private static let logger = Logger(subsystem: "io.github.laconicman.SwiftPJSUAKit",
+                                       category: "VoIPPushHandler")
 
     private let engine: PJSUA
     private let callKit: CallKitController
@@ -59,13 +60,18 @@ public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
                              for type: PKPushType) async {
         guard type == .voIP else { return }
 
-        let payloadDict = payload.dictionaryPayload
-        let serverUUID = (payloadDict["call_uuid"] as? String).flatMap(UUID.init(uuidString:))
-        let sipCallID = payloadDict["sip_call_id"] as? String
-        let handle = (payloadDict["from"] as? String) ?? "Unknown"
+        let push = VoIPPushPayload(payload.dictionaryPayload)
+        // The Call-ID stays private: what a library logs in public is the host app's call.
+        Self.logger.notice("VoIP push: call-id \(push.sipCallID ?? "none", privacy: .private(mask: .hash))")
 
         do {
-            try await callKit.reportIncomingCall(serverUUID: serverUUID, sipCallID: sipCallID, handle: handle)
+            // No server UUID: the push and the INVITE both derive the UUID from the Call-ID, which
+            // is what keeps them one call (Tech-Debt TD-30).
+            let uuid = try await callKit.reportIncomingCall(serverUUID: nil,
+                                                            sipCallID: push.sipCallID,
+                                                            handle: push.handle)
+            // Reported now, or already by the INVITE; the router logs which.
+            Self.logger.notice("VoIP push: the call is in CallKit as \(uuid, privacy: .public)")
         } catch {
             // PushKit's contract is satisfied — reportNewIncomingCall ran before this returns. The
             // system declined to ring (blocked caller, DND), which is its prerogative; nothing for

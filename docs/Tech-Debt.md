@@ -303,9 +303,13 @@ every path that kills a call *without ending it* is invisible.**
 - **`on_transport_state`** — SIP transport up/down. Earliest available signal that anything is wrong.
   The app's callback runs before pjsua's own handler (`pjsua_core.c:2386-2397`), so the session's
   transport can still be matched inside it (TD-31).
-- **`on_call_media_transport_state` / `on_ice_transport_error`** — ICE keep-alive failure
-  (`pjsua_media.c:1107-1133`), the stack's only continuous media-liveness signal. Idle until ICE is
-  enabled (offhook OH-4), cheap to wire alongside the others.
+- **`on_call_media_transport_state` / `on_ice_transport_error`** — with ICE, a TURN-refresh failure
+  and a STUN-detected change of the mapped address (`pjsua_media.c:1107-1133`). **Not a
+  media-liveness signal:** `OP_KEEP_ALIVE` means a TURN refresh failed twice (`ice_strans.c:3029-3032`,
+  `ice_strans.h:135-137`), a STUN keep-alive failure after init is dropped (`:2715-2723`,
+  `:1153-1156`), and the keep-alive to the peer is a Binding Indication, which gets no response
+  (`ice_session.c:1347-1390`). The RTP counter stays the only peer-liveness detector, with or without
+  ICE. Idle until ICE with TURN is enabled (offhook OH-4).
 
 - **Cost.** A call whose transport or media dies silently is reported as healthy, forever — see
   [Call-Termination-Paths](./Call-Termination-Paths.md) §4. Consumers cannot even implement their own

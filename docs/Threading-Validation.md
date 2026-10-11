@@ -34,7 +34,7 @@ synchronous re-entry would deadlock, not merely race.
 
 | Callback | Lock state when invoked |
 |---|---|
-| `on_reg_state`, `on_reg_state2`, `on_ip_change_progress`, `on_incoming_call` | **`PJSUA_LOCK` held** |
+| `on_reg_state`, `on_reg_state2`, `on_reg_started2`, `on_ip_change_progress`, `on_incoming_call` | **`PJSUA_LOCK` held** |
 | `on_call_state`, `on_call_tsx_terminate_session`, `on_mwi_state`, `on_auth_challenge` | no `PJSUA_LOCK`, but dialog/tsx `grp_lock` held upstream |
 
 Documented order is **`PJSUA_LOCK` > dialog `grp_lock` > tsx `grp_lock`**; calling *up* that order
@@ -89,3 +89,29 @@ against fork `cb0544e0d`. Neither callback is installed yet; both are proposed i
   above. The same deferral applies to the ICE/SRTP-failure notification, which reaches
   `on_call_media_state` via `ice_failed_nego_cb` on a 1 ms timer (`pjsua_media.c:1089-1090`,
   `:1992-1993`).
+
+## Addendum 2026-10-11 — the registration lifecycle's callbacks
+
+From the registration lifecycle ([Registration-Lifecycle](./Registration-Lifecycle.md)), verified
+against `288de6142`, the source of the shipped binary.
+
+- **`on_reg_started2` runs with `PJSUA_LOCK` held, on the thread that called
+  `pjsua_acc_set_registration`** — after the send, once that thread has taken the lock back
+  (`pjsua_acc.c:3879-3913`). That is the engine's thread for the engine's own sends and for the
+  registrations inside calls it makes (`pjsua_handle_ip_change`, `pjsua_acc_del`, `pjsua_destroy`),
+  and pjsua's worker for its own: the automatic-retry timer, the Contact rewrite inside `regc_cb`,
+  IP-change steps run from callbacks. The bridge drops the starts reported on the engine's thread,
+  which it recognises by the thread `installPJSUACallbacks` ran on (`pjsuaEngineThread`, written
+  once before `pjsua_init`, read-only after — the sinks' invariant).
+- **Why those starts are dropped:** the lock is released around the send, so the worker can process
+  a fast response and report its settlement first, and still hold its reference on the session
+  (`sip_reg.c:1206`, dropped last at `:1573`). `is_busy` then reads open after the settlement went
+  out. On the worker's own starts the reading holds: with one worker, timers polled on it too, the
+  response is processed only after the callback returns.
+- **`pjsip_regc_get_info` is read inside `on_reg_started2` and `on_reg_state2`** and takes the
+  session's lock under `PJSUA_LOCK`. No inversion: pjsip releases the session lock before it calls
+  back into pjsua (`sip_reg.c:1561-1562`), and pjsua makes the same call under `PJSUA_LOCK` itself
+  (`pjsua_acc_get_info`, `handle_ip_change_on_acc`).
+- **The registration channel is applied in the actor's own turns.** A task on the engine actor
+  reads it, so G2 holds: a callback yields and returns.
+

@@ -416,7 +416,50 @@ for the plain suspend/resume case, since nothing about the IP necessarily change
   by construction; the hazard is only our own `pjsua_transport_lis_restart()`), TD-22 (439),
   `Push-vs-Active-Socket.md` §5.
 
-## TD-23 — `reRegister` throws `PJSIP_EBUSY` on a *successful* credential rotation · open
+## TD-31 — pjsua state the engine can learn only from callbacks · open (wired as needed)
+pjsua keeps state the engine needs for decisions and exposes no getter for, or only one whose
+reading under pjsua's threading can catch it mid-change. The registration lifecycle
+(`Registration-Lifecycle.md`) keeps one such state from callbacks — each account's session: in
+flight, registered with its refresh due, or unregistered — and the IP-change operation's turn
+stands for "a sequence is running". The rest is not kept:
+
+- **An automatic retry pending** after a failed REGISTER: a pjsua timer with no callback until it
+  fires. The source of the window in `Registration-Lifecycle.md` §3.1.
+- **A Contact rewritten** by `acc_check_nat_addr`: the 2xx is swallowed, and nothing says why.
+- **The outbound flow** (`rfc5626_status`), **the server-affinity pin**, and **the transport a
+  session uses**, with its state (`on_transport_state` is not installed; TD-24).
+
+- **Trigger:** a decision that needs one of these. Wire it as the session state was wired: the
+  callback yields a `Sendable` value on the engine's channel, the actor applies it in its own turn,
+  and the callback's thread and lock context go into `Threading-Validation.md` first.
+- **Owed alongside:** an inventory of every pjsua callback the engine does not install — what it
+  conveys, its context, its would-be consumer.
+
+## TD-32 — an IP change waits behind a transaction stalled on the old path · open (deliberate)
+`handleIPChange` starts once no account's registration is busy, so a REGISTER stalled on a network
+path that just went away holds the recovery until pjsip's 32 s transaction timeout. pjsua alone
+would not wait: its IP-change step destroys and rebuilds a session it finds busy
+(`pjsua_acc_update_contact_on_ip_change`), orphaning the REGISTER — whose 401, on a path still up
+during a Wi-Fi → cellular handoff, is answered with the old Contact (the TD-23 shape). Waiting was
+chosen; not measured on a device.
+
+- **Also bounded only by the backstop:** a sequence that never reports `COMPLETED`, because an
+  account's step never ends — its re-REGISTER's 2xx swallowed by a Contact rewrite whose own send
+  fails, which no callback reports (`pjsua_acc.c`, `regc_cb`). After 70 s the call throws
+  `ipChangeTimedOut` and account operations resume.
+- **Possible refinement:** skip the wait for a session whose transport the sequence shuts down
+  anyway, which needs the transport identity TD-31 lists.
+
+## TD-23 — `reRegister` throws `PJSIP_EBUSY` on a *successful* credential rotation · **discharged 2026-10-11**
+**Discharged** by the registration lifecycle (`Registration-Lifecycle.md`). The analysis below had
+the cause right and the extent short. The trailing call also fired into a REGISTER in flight, which
+modify orphans and pjsip then answers with the old Contact. The same shape was in `removeAccount`,
+`addAccount`, `setRegistration` and `handleIPChange`. Neither proposed fix was taken: tolerating
+`PJSIP_EBUSY` reports success for a transaction whose outcome nobody has seen, and predicting
+modify's signal repeats its field rules in the engine. The runtime test asked for below is
+`Tests/SwiftPJSUATests/Registration/ReRegisterTests.swift`; against the old code the push change
+during a challenged REGISTER throws `PJSIP_EBUSY` (`Registration-Lifecycle.md` §5).
+
 Found 2026-08-04 while researching `offhook/docs/Push-vs-Active-Socket.md` (§1.5). `reRegister`
 ends with
 
@@ -566,7 +609,7 @@ request, since none is blocking and the PR series was already carrying review lo
 which predates all of it. The measurements above stand until a `swift-pjsip` rebuild, and the
 oversized-`.p12` test is what will tell us the rebuild happened.
 
-## TD-21 — `disable_reg_on_modify` is not a safe "apply config quietly" switch · obligation
+## TD-21 — `disable_reg_on_modify` is not a safe "apply config quietly" switch · obligation (amended 2026-10-11)
 Verified 2026-08-04, **history established 2026-08-17**. The flag suppresses the un-REGISTER and
 re-REGISTER, but `pjsua_acc_modify()` calls `destroy_regc(acc, PJ_TRUE)` on the `unreg_first` path
 regardless — which NULLs the regc (cancelling its refresh timer), clears `acc->contact` and
@@ -579,9 +622,12 @@ guarded the whole block; [#4509](https://github.com/pjsip/pjproject/pull/4509) (
 labelled `type: bug`) moved the guard inward on purpose — *"destroying old regc may still be
 needed so we can use the updated registration related settings"*. Only the doc comment is stale,
 in both `pjsua.h` and `pjsua2/account.hpp`.
-- **The obligation stands: the engine must never set `disable_reg_on_modify`** as a way to apply
-  configuration without signalling. The only fields that are genuinely signalling-free are the
-  silent column of `offhook/docs/Push-vs-Active-Socket.md` §1.1.
+- **The obligation, amended 2026-10-11: the engine sets `disable_reg_on_modify` only where it owns
+  the re-registration.** `reRegister` un-REGISTERs first when the Contact changes, then modifies
+  and REGISTERs in one synchronous step, so the destroyed session is replaced before anything can
+  observe it (`Registration-Lifecycle.md` §2). Never as a way to apply configuration without
+  signalling: the only fields that are genuinely signalling-free are the silent column of
+  `offhook/docs/Push-vs-Active-Socket.md` §1.1.
 - **Reassurance for our design:** #4509's rationale is the same shape as our pending-config slot
   drained on last-call-end — apply the settings, let the next registration pick them up. We simply
   have to own the re-registration.

@@ -277,9 +277,12 @@ attaches caller-controlled contact-URI parameters **before** `pjsua_acc_add`:
   string is free-form, the **deviated scenario** the product needs is supported directly: a silent
   push that overrides `pn-param` (e.g. drops `.voip`) and carries a *regular* APNs token is just a
   different string passed to `init(params:scope:)`.
-- `reRegister(_:updatingPush:)` is the seam for a silent-push-triggered re-REGISTER with updated
-  params; it rebuilds the account config from stored Swift state and calls `pjsua_acc_modify` +
-  `pjsua_acc_set_registration`, so it doesn't race or tear down the VoIP-push answer path.
+- `reRegister(_:updatingPush:wait:)` is the seam for a silent-push-triggered re-REGISTER with
+  updated params. It applies the stored Swift state on top of pjsua's live config
+  (`pjsua_acc_modify`, read-modify-write) and registers as a registration operation: after any
+  transaction in flight, un-REGISTERing the old binding first when the push parameters change, and
+  returning when the registrar confirms a binding that carries them (`Registration-Lifecycle.md`).
+  It touches only that account, so it doesn't race or tear down the VoIP-push answer path.
 
 ### 6.5 Dual-mode dedup (no double ring)
 The app must answer both via VoIP push **and** as an always-on client over a persisted connection,
@@ -418,10 +421,13 @@ payload contract (the VoIP one is Flexisip's, TD-2). **PR-b** added the video su
 ### Milestone 2 — Registration robustness & network changes
 - Parse `on_reg_state2` properly (`info.pointee.cbparam.pointee.code`/`.expiration`);
   surface real registration state; handle 401/403, retry/backoff, multiple accounts.
-- **IP/network change handling** — *engine side shipped*: `PJSUA.handleIPChange()` +
-  the `.ipChangeProgress` event (#17). App-side `NWPathMonitor` → `handleIPChange()`
-  wiring lives in Offhook (signature = status + preferred-route types + bound local
-  addresses; pending-slot pump coalesces flap storms, `.completed` drains it). Still
+- **IP/network change handling** — *engine side shipped*: `PJSUA.handleIPChange(wait:)` +
+  the `.ipChangeProgress` event (#17). Since 2026-10-11 it is a registration operation: one
+  sequence at a time, requests made during one coalescing into one more
+  (`Registration-Lifecycle.md`), which leaves an app-side pump nothing to do. App-side
+  `NWPathMonitor` → `handleIPChange()` wiring lives in Offhook (signature = status +
+  preferred-route types + bound local addresses; pending-slot pump coalesces flap storms,
+  `.completed` drains it). Still
   open: STUN refresh, and the **SRV-vs-A-record** gotcha — some providers (e.g. 1&1)
   don't publish SRV records, so an SRV-only resolver fails to register; fall back to
   plain address resolution. (Documented in
@@ -453,7 +459,10 @@ payload contract (the VoIP one is Flexisip's, TD-2). **PR-b** added the video su
 ### Milestone 4 — Hardening, testing, docs
 - **Concurrency:** migrate `enqueue` to `ExecutorJob`; add `withTaskCancellationHandler` so
   a cancelled `Task` maps onto a PJSIP hangup; consider an explicit actor-isolated state
-  machine; choose an `AsyncStream` buffering policy deliberately.
+  machine; choose an `AsyncStream` buffering policy deliberately. Registrations have theirs since
+  2026-10-11 (`Registration-Lifecycle.md`): operations that run one at a time to their end, on
+  session state kept from callbacks, over an unbounded internal channel. Other state only callbacks
+  carry is TD-31.
 - **Testing:** unit-test the executor (jobs run on the dedicated thread; serialization
   order; `stop()` drains cleanly), and lifetimes (thread + `pj_thread_desc`; the continuation
   finishes). PJSIP itself is hard to unit-test without a server — stand up a local SIP server

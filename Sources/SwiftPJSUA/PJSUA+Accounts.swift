@@ -158,7 +158,8 @@ extension PJSUA {
     ///
     /// The account is removed whatever the registrar answers. A failed un-REGISTER then throws
     /// ``RegistrationError/rejected(_:statusCode:)`` all the same, because the registrar may keep
-    /// the binding until it expires.
+    /// the binding until it expires. When pjsua reports nothing within the engine's backstop, the
+    /// call throws ``RegistrationError/timedOut(_:)`` and the account stays, to be removed again.
     ///
     /// Calls still using the account are unaffected at the SIP-dialog level but can no longer
     /// authenticate re-INVITEs; hang up first.

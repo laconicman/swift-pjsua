@@ -4,8 +4,9 @@
 > `pjsip_cfg()->endpt.disable_tcp_switch = 0`, because the prebuilt binary compiles
 > `PJSIP_DONT_SWITCH_TO_TCP 1` (the opposite of pjsip's default) and that silently prevented **any**
 > authenticated call from being placed over a UDP transport — the oversized resend fragmented and
-> vanished, at two independent providers. Runtime setting, no rebuild needed; the compile-time
-> macro should also be dropped when `swift-pjsip` is next rebuilt. Evidence:
+> vanished, at two independent providers. Runtime setting, no rebuild needed. The compile-time
+> macro has since been dropped from `swift-pjsip`'s `config_site` (since 0.2.1), so the runtime
+> write now restates pjsip's default and stays only as a guard. Evidence:
 > `../../offhook/docs/SIP-Test-Infrastructure.md` §6.
 
 A register of known shortcuts, deferrals, and obligations in `swift-pjsua`. Each item is
@@ -435,7 +436,7 @@ in [Threading-Validation](./Threading-Validation.md).
 |---|---|---|---|
 | The account's TCP/TLS connection | `on_transport_state`, matched against `pjsip_regc_get_info(regc).transport` read in `on_reg_state2`. The regc holds a reference on it, and the app's callback runs before pjsua's own handler | while suspended (nothing is sent); pjsua's own reaction to `DISCONNECTED` (releases the transport, demotes outbound, arms a retry) has no callback | TD-24's resume policy or OH-12's "skip `ip_change` when the connection is fresh": a `CONNECTED` after the last resume is the freshness proof pjsua has no getter for |
 | An INVITE pjsua refused itself | `on_rejected_incoming_call` (`rdata` carries the Call-ID) | — `on_incoming_call` never fires for it | the Kit ends a push-reported call now instead of on the pending-entry sweep |
-| An auth challenge outstanding | `on_auth_challenge` | a deferred REGISTER challenge clears `has_tsx`, so `is_busy` reads idle | credential-on-demand (TD-11). **2.17.0's deferred path is a use-after-free for REGISTER** (upstream `5c605b499`): bump `swift-pjsip` first |
+| An auth challenge outstanding | `on_auth_challenge` | a deferred REGISTER challenge clears `has_tsx`, so `is_busy` reads idle | credential-on-demand (TD-11). **2.17.0's deferred path was a use-after-free for REGISTER** (upstream `5c605b499`, #5251); fixed in the binary since `swift-pjsip` 0.3.0 |
 | An automatic retry pending | inferred: a failure settlement with a retryable code (408, 480, 500, 502–504, 6xx) or a 439 to an outbound REGISTER, while `reg_retry_interval` ≠ 0 and no IP change; or the session transport's `DISCONNECTED` | arming; re-arming after the timer's own send fails | a decision that must not race the retry (Registration-Lifecycle §3.1) |
 | A Contact rewritten | inferred: a pjsua-thread `on_reg_started2` while the engine's own send is unsettled (the 2xx was swallowed); the rewrite's settlement lists the new Contact | the swallowed 2xx; with ALWAYS_UPDATE, the rewrite on a ≥ 400 answer | a decision on the registered Contact |
 | The outbound flow (`rfc5626_status`) | recomputable from the 2xx in `on_reg_state2` (`Require: outbound`), given outbound was offered | demotion on transport loss | an outbound-specific reachability decision |
@@ -516,12 +517,14 @@ hop clears the sticky rejection instead of retrying into another 439.
 - **The app-side mitigation this entry used to prescribe is now unnecessary** — do not add it.
 - **Now in the shipped binary:** `swift-pjsip` 0.2.1 (PJSIP 2.17.0, `288de6142`) contains both
   commits — verified by ancestry (`77ad3feec`, `716ef557d` are ancestors of the tagged base).
-  Bump checklist: `Upstream/reference-post-2.16-fixes-impact.md`.
+  Bump checklist: `Upstream/post-2.16-fixes-impact.md`.
 - Note: [`pjproject-5154`](../Upstream/pjproject-5154-439-first-hop-lacks-outbound.md). The
-  remaining half — pushing the Contact to the regc when outbound turns out unsupported — is still
-  on the fork as [laconicman#15](https://github.com/laconicman/pjproject/pull/15).
+  remaining half — pushing the Contact to the regc when outbound turns out unsupported — merged
+  upstream as [#5281](https://github.com/pjsip/pjproject/pull/5281) (`87d1f8a74`, with the
+  [#5311](https://github.com/pjsip/pjproject/pull/5311) refactor) and is in the binary since
+  `swift-pjsip` 0.3.0. Not yet observed against a live registrar from this engine.
 
-## TD-29 — TLS now fails fast at start, and our only recovery path is TD-19 · open (blocks TLS) · **measured 2026-09-01**
+## TD-29 — TLS now fails fast at start, and our only recovery path is TD-19 · open (blocks TLS) · **measured 2026-09-01, re-measured 2026-10-11 on swift-pjsip 0.3.0**
 Found while fixing the Apple TLS backends upstream, Aug 2026; the runtime behaviour below was
 observed on the Simulator on 2026-09-01 (`Tests/SwiftPJSUATests/TLSTransportTests.swift`).
 
@@ -582,11 +585,20 @@ saw behaviour differ between iPhoneOS 26.2 and 26.5, so treat the SDK stamp as l
 | restart with a defaulted config | `PJ_SUCCESS`, listener re-binds on a new port, credentials gone (TD-19) |
 | restart with an unloadable certificate | fails — which is what proves the row above is a real drop and not a preserved setting |
 
+**Re-measured 2026-10-11** on `swift-pjsip` 0.3.0 (PJSIP master `bd69054a6`, which carries #5222 and
+#5233), Xcode 27.0 (27A266a), iPhone 17 Pro simulator, iOS 26.0:
+
+| what | observed |
+|---|---|
+| valid `.p12` of 12 205 bytes | **loads**, listener bound — the 8 KB truncation is gone (`testOversizedPKCS12Loads`) |
+| restart with a defaulted config | unchanged: `PJ_SUCCESS`, re-binds, credentials gone (TD-19 still holds) |
+| failed restart, then a restart with a loadable certificate | **recovers**: `PJ_SUCCESS` and the listener re-binds (port 63168) — #5233 (`testRestartAfterAFailedRestartRecovers`) |
+
 So #5216's eager behaviour is exactly as advertised on the backend we ship: a bad certificate is a
 `pjsua_transport_create()` error, not a mystery at first connection. **What is not as advertised is
 the recovery.**
 
-### The recovery path does not recover
+### The recovery path did not recover (through 0.2.1; fixed in 0.3.0, see above)
 
 "Call restart, reschedule on failure" is the recipe — `restart_listener()` in `pjsua_core.c` is the
 model, and it is what we argued for upstream. Measured, it does not work through
@@ -600,13 +612,18 @@ model, and it is what we argued for upstream. Measured, it does not work through
    does not re-open the socket, and returns `PJ_SUCCESS`**;
 3. so the scheduled retry reports success forever while the listener stays down. Observed:
    the port stays at 0 after the "successful" retry
-   (`testRestartAfterAFailedRestartReportsSuccessWithoutRecovering`).
+   (`testRestartAfterAFailedRestartReportsSuccessWithoutRecovering`, inverted in 0.3.0 into
+   `testRestartAfterAFailedRestartRecovers`).
 
 The only route back appears to be destroying the transport and creating a new one. That has to be
 settled before we ship TLS, because the whole fail-fast design is premised on restart being a
 usable recovery.
 
-**Upstream: filed, not fixed.** All three went into
+**Fixed upstream for §5, in our binary since 0.3.0.** The recovery below now works: a factory
+that wanted a listener really restarts it ([pjproject#5233](https://github.com/pjsip/pjproject/pull/5233)),
+measured above. The rest of this section is the 0.2.1 analysis, kept because §7 is still open.
+
+**Upstream: filed.** All three went into
 [pjproject#5232](https://github.com/pjsip/pjproject/issues/5232) — a register rather than a
 request, since none is blocking and the PR series was already carrying review load:
 - **§5** — `restart2`'s no-listener branch should re-open the listener, or at minimum not report
@@ -619,10 +636,11 @@ request, since none is blocking and the PR series was already carrying review lo
   but iOS takes the `SecPKCS12Import()` branch. Cosmetic, one string, and it sends anyone
   debugging a `.p12` to the wrong API's documentation.
 
-**None of this is fixed for us either way.** The eight-PR Apple-TLS series merged upstream on
-2026-09-02 — including #5222, the 8 KB fix — but our binary is pinned at 2.17.0 (`288de6142`),
-which predates all of it. The measurements above stand until a `swift-pjsip` rebuild, and the
-oversized-`.p12` test is what will tell us the rebuild happened.
+**What 0.3.0 changed for us.** The Apple-TLS series (#5222, the 8 KB fix, among them) and #5233
+are in the binary since `swift-pjsip` 0.3.0, and both show in the re-measurement above. §6 is
+covered by #5233's single credential loader, which handles `cert_direct` on restart too; not tested
+here. §7 is open. What keeps this entry open is TD-19: the recovery works only when the restart is
+handed the credentials again, and pjsua gives the engine nothing to read them back from.
 
 ## TD-21 — `disable_reg_on_modify` is not a safe "apply config quietly" switch · obligation (amended 2026-10-11)
 Verified 2026-08-04, **history established 2026-08-17**. The flag suppresses the un-REGISTER and
@@ -731,9 +749,14 @@ with — and a defaulted one leaves it with nothing.
   `pjsua_transport_config` and re-supply it on every restart** — there is nothing to read it back
   from.
 - **Do not build the credential surface on `cert_direct`.** Listener start has four credential
-  branches (files, buffer, store, `cert_direct`); `restart2` has three and **no `cert_direct`**
-  (confirmed at `288de6142`). A listener configured that way cannot have its certificate restored
-  by a restart even when the settings are re-supplied faithfully. Use `cert_file` (or `cert_buf`).
+  branches (files, buffer, store, `cert_direct`); `restart2` had three and **no `cert_direct`**
+  (confirmed at `288de6142`). Since `swift-pjsip` 0.3.0 one loader serves both (pjproject#5233)
+  and covers `cert_direct`, but that is untested here. `cert_direct` is OpenSSL-only anyway. Use
+  `cert_file` (or `cert_buf`).
+- **Re-measured 2026-10-11 on `swift-pjsip` 0.3.0: still holds.** The defaulted-config restart
+  still succeeds, re-binds and drops the credentials. #5233 made a restart reload from whatever
+  config it is handed, which is precisely the shape that loses them
+  (`testListenerRestartReplacesCredentialsRatherThanPreservingThem`, unchanged and passing).
 - **Discharge condition:** either upstream gives `pjsua_transport_lis_restart()` a way to say
   "keep what you have", or our TLS transport surface carries the live config across restarts and
   a test proves it. Not before.

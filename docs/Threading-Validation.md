@@ -50,7 +50,10 @@ which is the point of preventing re-entrancy by construction rather than by conv
    acquire `PJSUA_LOCK`. The planned credential-on-demand design
    (`Configuration-Design.md` §4) must therefore use its **async/deferred** path — resolve the
    secret, then `pjsip_auth_clt_async_send_req` — never a synchronous Keychain read inside the
-   callback. A biometric prompt there would block a SIP worker thread under a lock.
+   callback. A biometric prompt there would block a SIP worker thread under a lock. **On the shipped
+   2.17.0 binary that path is a use-after-free for REGISTER:** the deferred token holds no
+   reference on the registration session, so a deferral can outlive it. Fixed upstream in
+   `5c605b499` (#5251); bump `swift-pjsip` past it first.
 2. **Never add a synchronous `pjsua_*` request** (make_call/answer/hangup/register) to a
    callback. Under `on_reg_state2` or `on_incoming_call` that call would contend for a
    `PJSUA_LOCK` the worker already holds.

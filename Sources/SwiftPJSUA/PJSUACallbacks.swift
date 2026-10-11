@@ -41,7 +41,8 @@ import PJSIP
 // tsx grp_lock held and must NOT acquire PJSUA_LOCK. If we adopt it to supply secrets on demand
 // (see docs/Configuration-Design.md §4), the fetch must use its **async/deferred** path —
 // `pjsip_auth_clt_async_send_req` after the secret arrives — never a synchronous Keychain read
-// inside the callback.
+// inside the callback. That path is a use-after-free for REGISTER in the shipped 2.17.0 binary
+// (fixed upstream in `5c605b499`, #5251): bump swift-pjsip first.
 //
 // Full findings: docs/Threading-Validation.md.
 //

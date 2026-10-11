@@ -20,7 +20,9 @@ extension PJSUA {
     ///
     /// **Requests coalesce, and the latest push parameters win.** A call stores its push
     /// parameters when it is made. A request made while an earlier one still waits for its turn
-    /// joins it, and that one re-registration answers both.
+    /// joins it, and that one re-registration answers both. They stay stored when the
+    /// re-registration fails: they are the account's configuration from then on, and the next
+    /// re-registration applies them.
     ///
     /// - Parameters:
     ///   - push: new push parameters, or `nil` to keep the current ones.

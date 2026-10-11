@@ -65,7 +65,8 @@ final class AccountConfigurationTests: XCTestCase {
                                  registrar: "sip:127.0.0.1:9",
                                  username: "alice",
                                  registrationTimeout: registrationTimeout),
-            credentials: InlineCredentialStore(password: "unused"))
+            credentials: InlineCredentialStore(password: "unused"),
+            wait: .dispatched)
 
         for _ in 0..<50 {
             if let message = lines.snapshot.first(where: { $0.contains("REGISTER sip:127.0.0.1:9") }) {

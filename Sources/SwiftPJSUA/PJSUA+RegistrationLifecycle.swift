@@ -323,13 +323,31 @@ extension PJSUA {
 
     // MARK: Sending and confirming
 
+    /// Send a REGISTER (`renew`) or un-REGISTER from a quiet reading, tell `operation`'s callers it
+    /// is dispatched, and await the registrar's answer. `nil` when pjsua refused because a
+    /// transaction of its own is in flight: the caller waits for quiet again and sends again.
+    func exchangeRegistration(_ account: AccountID,
+                              renew: Bool,
+                              generation: UInt64,
+                              mailbox: UInt64,
+                              operation: UInt64) async throws -> RegistrationSettlement? {
+        do {
+            try sendRegistration(account, renew: renew)
+        } catch is RegistrationBusy {
+            return nil
+        }
+        markRegistrationDispatched(operation)
+        return try await awaitSettlement(of: account, generation: generation,
+                                         mailbox: mailbox, renew: renew)
+    }
+
     /// Send a REGISTER (`renew`) or un-REGISTER on `account`'s session, from a quiet reading.
     ///
     /// - Throws: ``RegistrationBusy`` when pjsua refuses because a transaction of its own started
     ///   after the quiet reading (its start not yet applied); the session is then marked pending, so
     ///   the caller's next wait for quiet waits for that transaction. Any other refusal throws
-    ///   ``PJSUAError``.
-    func sendRegistration(_ account: AccountID, renew: Bool) throws {
+    ///   ``RegistrationError/failed(_:_:)``.
+    private func sendRegistration(_ account: AccountID, renew: Bool) throws {
         let status = pjsua_acc_set_registration(account.raw, renew.pjBool)
         if status.isSuccess || status == PJSIP_EBUSY {
             // In flight: ours, or the one that refused ours.
@@ -341,7 +359,9 @@ extension PJSUA {
                      + "\(renew ? "REGISTER" : "un-REGISTER") waits for it to settle")
             throw RegistrationBusy()
         }
-        try status.throwIfFailed()
+        guard status.isSuccess else {
+            throw RegistrationError.failed(account, PJSUAError(status: status))
+        }
     }
 
     /// Whether the registrar took what the engine sent: a 2xx; for a REGISTER also an expiry and,
@@ -350,7 +370,9 @@ extension PJSUA {
     func confirmRegistration(_ settlement: RegistrationSettlement,
                              of account: AccountID,
                              push: PushConfiguration?) throws {
-        guard settlement.status.isSuccess else { throw PJSUAError(status: settlement.status) }
+        guard settlement.status.isSuccess else {
+            throw RegistrationError.failed(account, PJSUAError(status: settlement.status))
+        }
         guard (200..<300).contains(settlement.code) else {
             throw RegistrationError.rejected(account, statusCode: settlement.code)
         }

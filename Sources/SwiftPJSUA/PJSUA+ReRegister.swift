@@ -30,9 +30,10 @@ extension PJSUA {
     ///     ``RegistrationWait/dispatched`` returns once the first request is sent.
     /// - Throws: ``RegistrationError/rejected(_:statusCode:)`` for a final non-2xx;
     ///   ``RegistrationError/bindingNotConfirmed(_:)`` when the 2xx shows the registrar did not keep
-    ///   the Contact; ``RegistrationError/timedOut(_:)``; ``PJSUAError`` for a stack failure; and
-    ///   ``PJSUAUsageError/unknownAccount(_:)`` or ``PJSUAUsageError/accountReplaced(_:)`` when the
-    ///   account went away meanwhile.
+    ///   the Contact; ``RegistrationError/failed(_:_:)`` when pjsip could not send or got no
+    ///   response; ``RegistrationError/timedOut(_:)``; ``PJSUAError`` when pjsua refused the new
+    ///   configuration; and ``PJSUAUsageError/unknownAccount(_:)`` or
+    ///   ``PJSUAUsageError/accountReplaced(_:)`` when the account went away meanwhile.
     public func reRegister(_ account: AccountID,
                            updatingPush push: PushConfiguration? = nil,
                            wait: RegistrationWait = .confirmed()) async throws {
@@ -71,15 +72,12 @@ extension PJSUA {
 
             if params.config.push != params.appliedPush, !unregistered,
                case .registered = registration.sessions[account] {
-                do {
-                    try sendRegistration(account, renew: false)
-                } catch is RegistrationBusy {
-                    continue
-                }
-                markRegistrationDispatched(operation)
+                guard let answer = try await exchangeRegistration(account, renew: false,
+                                                                  generation: generation,
+                                                                  mailbox: mailbox,
+                                                                  operation: operation)
+                else { continue }
                 unregistered = true
-                let answer = try await awaitSettlement(of: account, generation: generation,
-                                                       mailbox: mailbox, renew: false)
                 if !answer.isSuccess {
                     // The registrar may keep the old binding until it expires; the new one is
                     // registered all the same.
@@ -90,14 +88,11 @@ extension PJSUA {
             }
 
             let push = try applyStoredConfiguration(account, generation: generation, secret: secret)
-            do {
-                try sendRegistration(account, renew: true)
-            } catch is RegistrationBusy {
-                continue
-            }
-            markRegistrationDispatched(operation)
-            let answer = try await awaitSettlement(of: account, generation: generation,
-                                                   mailbox: mailbox, renew: true)
+            guard let answer = try await exchangeRegistration(account, renew: true,
+                                                              generation: generation,
+                                                              mailbox: mailbox,
+                                                              operation: operation)
+            else { continue }
             try confirmRegistration(answer, of: account, push: push)
             return
         }

@@ -21,7 +21,8 @@ extension RegistrationTests {
 
             try await RegistrationTests.withEngine { engine in
                 let account = try await engine.addAccount(RegistrationTests.account(registrar),
-                                                          credentials: RegistrationTests.password)
+                                                          credentials: RegistrationTests.password,
+                                                          wait: .dispatched)
                 try await engine.removeAccount(account)
                 #expect(await engine.accountParameters[account] == nil)
 

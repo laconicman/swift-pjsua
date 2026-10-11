@@ -53,7 +53,7 @@ public actor PJSUA {
     /// gate engine calls on it rather than trusting event ordering at shutdown boundaries.
     public var isRunning: Bool { state == .running }
 
-    /// Parameters of accounts added via ``addAccount(_:credentials:)``, kept so a silent-push
+    /// Parameters of accounts added via ``addAccount(_:credentials:wait:)``, kept so a silent-push
     /// re-REGISTER can re-apply the fields we own on top of pjsua's live config. See
     /// `PJSUA+Accounts.swift`.
     var accountParameters: [AccountID: AccountParameters] = [:]

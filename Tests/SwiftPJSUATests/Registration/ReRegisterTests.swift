@@ -21,7 +21,8 @@ extension RegistrationTests {
 
             try await RegistrationTests.withEngine { engine in
                 let account = try await engine.addAccount(RegistrationTests.account(registrar),
-                                                          credentials: RegistrationTests.password)
+                                                          credentials: RegistrationTests.password,
+                                                          wait: .dispatched)
                 try await engine.reRegister(account, updatingPush: RegistrationTests.push)
 
                 try await Task.sleep(for: .seconds(1))   // room for a straggler from an orphan
@@ -178,7 +179,8 @@ extension RegistrationTests {
 
             try await RegistrationTests.withEngine { engine in
                 let account = try await engine.addAccount(RegistrationTests.account(registrar),
-                                                          credentials: RegistrationTests.password)
+                                                          credentials: RegistrationTests.password,
+                                                          wait: .dispatched)
                 let first = Task {
                     try await engine.reRegister(account, updatingPush: RegistrationTests.otherPush)
                 }
@@ -230,7 +232,8 @@ extension RegistrationTests {
 
             try await RegistrationTests.withEngine { engine in
                 let account = try await engine.addAccount(RegistrationTests.account(registrar),
-                                                          credentials: RegistrationTests.password)
+                                                          credentials: RegistrationTests.password,
+                                                          wait: .dispatched)
                 try await RegistrationTests.eventually { registrar.requests.count == 1 }
 
                 let started = ContinuousClock.now

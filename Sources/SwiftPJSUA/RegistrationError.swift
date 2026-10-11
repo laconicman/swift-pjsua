@@ -1,5 +1,4 @@
-/// Why a registration operation did not end the way it was asked to. A transaction that ended
-/// without a SIP response surfaces as a ``PJSUAError`` carrying pjsip's status instead.
+/// Why a registration operation did not end the way it was asked to.
 ///
 /// Every account-level case names the account, so a caller that never got an ``AccountID`` back
 /// — an add whose first REGISTER was refused — still has one.
@@ -7,6 +6,10 @@ public enum RegistrationError: Error, Equatable, CustomStringConvertible {
     /// The (un-)REGISTER got a final non-2xx response. pjsip reports 408 itself when nothing
     /// answered.
     case rejected(AccountID, statusCode: Int32)
+
+    /// pjsip could not send the (un-)REGISTER, or its transaction ended without a SIP response it
+    /// could report; the status says why.
+    case failed(AccountID, PJSUAError)
 
     /// The registrar answered 2xx, but either granted no expiry or listed bindings none of which
     /// carries the account's push parameters: it did not keep the Contact the engine sent.
@@ -24,6 +27,8 @@ public enum RegistrationError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .rejected(let account, let statusCode):
             "RegistrationError.rejected(\(account), statusCode: \(statusCode))"
+        case .failed(let account, let error):
+            "RegistrationError.failed(\(account), \(error))"
         case .bindingNotConfirmed(let account):
             "RegistrationError.bindingNotConfirmed(\(account))"
         case .timedOut(let account):

@@ -95,7 +95,8 @@ public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
     ///
     /// - Parameters:
     ///   - payload: the silent push's `dictionaryPayload` (or `userInfo`).
-    ///   - account: the account to refresh; the app holds this from ``PJSUA/addAccount(_:credentials:)``.
+    ///   - account: the account to refresh; the app holds this from
+    ///     ``PJSUA/addAccount(_:credentials:wait:)``.
     ///   - push: replacement push parameters, or `nil` to keep the account's current ones.
     public func handleSilentPush(_ payload: [AnyHashable: Any],
                                  account: AccountID,

@@ -70,7 +70,8 @@ public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
             let uuid = try await callKit.reportIncomingCall(serverUUID: nil,
                                                             sipCallID: push.sipCallID,
                                                             handle: push.handle)
-            Self.logger.notice("VoIP push reported to CallKit as \(uuid, privacy: .public)")
+            // Reported now, or already by the INVITE; the router logs which.
+            Self.logger.notice("VoIP push: the call is in CallKit as \(uuid, privacy: .public)")
         } catch {
             // PushKit's contract is satisfied — reportNewIncomingCall ran before this returns. The
             // system declined to ring (blocked caller, DND), which is its prerogative; nothing for

@@ -10,7 +10,7 @@ import SwiftPJSUA
 /// - a **silent** background push — which is delivered through the app delegate's
 ///   `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)`, **not** PushKit —
 ///   is forwarded to ``handleSilentPush(_:account:updatingPush:)`` to re-REGISTER with updated
-///   push parameters (``PJSUA/reRegister(_:updatingPush:)``).
+///   push parameters (``PJSUA/reRegister(_:updatingPush:wait:)``).
 ///
 /// The VoIP payload contract is Flexisip's (see ``VoIPPushPayload``). The silent-push schema
 /// (`action == "reregister"`) is still a placeholder to be matched to a real server, and the app
@@ -39,7 +39,7 @@ public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
                              didUpdate pushCredentials: PKPushCredentials,
                              for type: PKPushType) {
         // pushCredentials.token is the APNs token. The app builds a PushConfiguration from it
-        // and (re)registers; see PushConfiguration.apns(...) and PJSUA.reRegister(_:updatingPush:).
+        // and (re)registers; see PushConfiguration.apns(...) and PJSUA.reRegister(_:updatingPush:wait:).
     }
 
     // Modern async variant of `pushRegistry(_:didReceiveIncomingPushWith:for:)` (iOS 11+,
@@ -87,7 +87,7 @@ public final class VoIPPushHandler: NSObject, PKPushRegistryDelegate {
     /// **not** flow through PushKit.
     ///
     /// This path is deliberately independent of the VoIP-push answer path and of app-lifecycle
-    /// events: ``PJSUA/reRegister(_:updatingPush:)`` only mutates this account's config and
+    /// events: ``PJSUA/reRegister(_:updatingPush:wait:)`` only mutates this account's config and
     /// registration, so a silent re-REGISTER cannot race or tear down an in-flight incoming call.
     /// To carry a *regular* APNs token instead of the VoIP `pn-param` (a deviated scenario), build
     /// the override with ``PushConfiguration/init(params:scope:)`` or

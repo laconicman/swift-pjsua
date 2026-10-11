@@ -14,7 +14,7 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
     /// with the pjsua account table already full. The table is a fixed array sized
     /// `PJSUA_MAX_ACC` at *binary* build time (4 in the shipped `PJ_CONFIG_IPHONE` build) and
     /// overflowing it is a hard C assert — the engine guards and throws instead. Free a slot
-    /// with ``PJSUA/removeAccount(_:)`` or rebuild `swift-pjsip` with a larger table.
+    /// with ``PJSUA/removeAccount(_:wait:)`` or rebuild `swift-pjsip` with a larger table.
     case accountTableFull(capacity: UInt32)
 
     /// A media-index argument was negative. pjsua's `med_idx` is `unsigned`, so a negative

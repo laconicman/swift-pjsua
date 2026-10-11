@@ -19,7 +19,7 @@ public struct CredentialRequest: Sendable, Equatable {
 /// The engine retains the *store*, never the secret, so ``AccountConfiguration`` stays free of
 /// credentials and can be persisted (it is `Codable`) with no risk of writing a password to disk.
 /// The store is consulted when an account is added and again whenever its config is rebuilt
-/// (``PJSUA/reRegister(_:updatingPush:)``).
+/// (``PJSUA/reRegister(_:updatingPush:wait:)``).
 ///
 /// - Important: implementations must **not** block the caller's executor — the engine's executor
 ///   is a single PJLIB-registered thread that also runs SIP. Keychain reads gated on user presence

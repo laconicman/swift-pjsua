@@ -71,9 +71,10 @@ struct RegistrationLifecycle {
 
     // MARK: Operations
 
-    /// A request that may join an operation of the same kind still waiting for its turn.
+    /// A request that may join an operation of the same kind still waiting for its turn. The
+    /// generation keeps a request from joining an operation for an account whose id was recycled.
     enum JoinKey: Hashable {
-        case reRegister(AccountID)
+        case reRegister(AccountID, generation: UInt64)
         case ipChange
     }
 

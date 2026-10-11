@@ -40,6 +40,25 @@ final class AccountConfigurationTests: XCTestCase {
         XCTAssertEqual(roundTripped.registrationTimeout, 3600)
     }
 
+    /// `Expires: 0` would un-REGISTER the binding it means to create, so the add refuses it.
+    func testZeroRegistrationTimeoutIsRefused() async throws {
+        let engine = PJSUA()
+        self.engine = engine
+        try await engine.start(PJSUA.Configuration())
+
+        do {
+            try await engine.addAccount(
+                AccountConfiguration(id: "sip:alice@127.0.0.1", registrar: "sip:127.0.0.1:9",
+                                     username: "alice", registrationTimeout: 0),
+                credentials: InlineCredentialStore(password: "unused"))
+            XCTFail("an account with a zero registration timeout was added")
+        } catch PJSUAUsageError.zeroRegistrationTimeout {
+            // expected
+        }
+        let accounts = await engine.accountParameters
+        XCTAssertTrue(accounts.isEmpty)
+    }
+
     func testRegistrationTimeoutSetsRegisterExpires() async throws {
         let expires = try await firstRegisterExpires(registrationTimeout: 3600)
         XCTAssertEqual(expires, "3600")

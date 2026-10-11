@@ -194,6 +194,7 @@ extension PJSUA {
         }
         // Add path only: reRegister's read-modify-write keeps the live value (D-CONFIG-4).
         if let timeout = config.registrationTimeout {
+            guard timeout > 0 else { throw PJSUAUsageError.zeroRegistrationTimeout }
             acc.reg_timeout = timeout
         }
 

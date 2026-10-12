@@ -179,6 +179,17 @@ extension PJSUA {
         }
     }
 
+    /// The connection `account`'s registration went over at its last 2xx; `nil` when the account
+    /// is not registered, or since that connection was reported ``TransportState/disconnected`` or
+    /// ``TransportState/destroyed``. Match it against ``PJSUAEvent/transportState(_:)``: while the
+    /// app is active, a ``TransportState/connected`` for it since the app last became active shows
+    /// the connection has not been through a suspension, which pjsua has no getter for
+    /// (`docs/Tech-Debt.md` TD-31; offhook OH-12). In the background it shows nothing: the app can
+    /// be suspended there with no callback.
+    public func registrationTransport(of account: AccountID) -> TransportInstanceID? {
+        pjsuaRegistrationTransport(of: account.raw).map(TransportInstanceID.init(raw:))
+    }
+
     private func removeAccountSteps(_ account: AccountID,
                                     generation: UInt64,
                                     operation: UInt64) async throws {

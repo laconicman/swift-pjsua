@@ -28,10 +28,14 @@ import PJSIP
 // pjsua's own locks **held**, so a synchronous re-entry would deadlock rather than misbehave:
 //
 //   held under PJSUA_LOCK  : on_reg_state, on_reg_state2, on_reg_started2,
-//                            on_ip_change_progress, on_incoming_call
+//                            on_ip_change_progress, on_incoming_call,
+//                            on_rejected_incoming_call
 //   no PJSUA_LOCK, but the dialog/tsx grp_lock is held upstream:
 //                            on_call_state, on_call_tsx_terminate_session, on_mwi_state,
 //                            on_auth_challenge
+//   depends on the path    : on_transport_state — no lock for a socket error, the transport
+//                            manager's and the transport's for a shutdown, PJSUA_LOCK too
+//                            inside an IP change; on the worker or the sending thread
 //
 // Documented lock order is PJSUA_LOCK > dialog grp_lock > tsx grp_lock, so calling *up* that
 // order from inside a callback is an ABBA inversion. `on_call_tsx_terminate_session`'s own
@@ -44,7 +48,8 @@ import PJSIP
 // inside the callback. That path is a use-after-free for REGISTER in the shipped 2.17.0 binary
 // (fixed upstream in `5c605b499`, #5251): bump swift-pjsip first.
 //
-// Full findings: docs/Threading-Validation.md.
+// Full findings: docs/Threading-Validation.md. Every pjsua callback, installed or not, with what it
+// conveys and when it is worth wiring: docs/Callback-Inventory.md.
 //
 // `nonisolated(unsafe)` invariant: written exactly once via ``makePJSUAEventStreams()`` in
 // `PJSUA.init`, before `pjsua_start()` can fire any callback; read-only thereafter.
@@ -153,6 +158,9 @@ func finishPJSUAEventStreams() {
     regDedupLock.lock()
     lastEmittedRegState.removeAll()
     regDedupLock.unlock()
+    registrationTransportLock.lock()
+    registrationTransports.removeAll()
+    registrationTransportLock.unlock()
 }
 
 /// Telemetry yield: the bounded `events` stream only.
@@ -186,6 +194,8 @@ func installPJSUACallbacks(into cfg: inout pjsua_config) {
     cfg.cb.on_ip_change_progress = { op, status, info in
         pjsuaOnIPChangeProgress(op, status, info)
     }
+    cfg.cb.on_transport_state = { tp, state, info in pjsuaOnTransportState(tp, state, info) }
+    cfg.cb.on_rejected_incoming_call = { param in pjsuaOnRejectedIncomingCall(param) }
 }
 
 /// Debug sanity check: every callback must arrive on a thread PJLIB has registered.
@@ -367,6 +377,7 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
         regDedupLock.lock()
         lastEmittedRegState[accId] = nil
         regDedupLock.unlock()
+        recordRegistrationTransport(nil, for: accId)
         emitCall(.registrationState(
             account: AccountID(accId), active: false, statusCode: 0, expiration: 0
         ))
@@ -383,6 +394,7 @@ private func pjsuaOnRegState2(_ accId: pjsua_acc_id, _ info: UnsafeMutablePointe
     // "Active" = a renewing registration that the server accepted (2xx) with a live
     // expiration. A successful un-REGISTER (renewing == false, expiration == 0) is inactive.
     let active = renewing && (Int32(PJSIP_SC_OK.rawValue) ..< 300).contains(statusCode) && expiration > 0
+    recordRegistrationTransport(active ? sessionTransport(regInfo.regc) : nil, for: accId)
     // Every registration *transition* goes on the guaranteed channel — the single ordered,
     // authoritative path for account state. Identical renewal heartbeats emit only to the
     // bounded `events` record: they are periodic, self-replacing, and would otherwise grow
@@ -458,6 +470,42 @@ private func refreshDelay(of regc: OpaquePointer?) -> UInt32? {
     var state = pjsip_regc_info()
     guard pjsip_regc_get_info(regc, &state).isSuccess, state.auto_reg.bool else { return nil }
     return state.next_reg
+}
+
+/// The connection each account's registration went over at its last 2xx, as an address, keyed by
+/// pjsua account id. `on_transport_state` reads it to name the accounts a connection carried: it
+/// runs before pjsua's own handler, which then releases the connection from those sessions, after
+/// which nothing can tell. The session holds a reference on the transport until that release, so
+/// the address cannot be reused while an entry names it. Entries go on that connection's
+/// disconnection or destruction, and on any settlement that leaves the account unregistered.
+/// Guarded by `registrationTransportLock`: `on_transport_state` runs on the worker and on sending
+/// threads. A leaf lock: nothing is called while it is held.
+private let registrationTransportLock = NSLock()
+private var registrationTransports: [pjsua_acc_id: UInt] = [:]
+
+private func recordRegistrationTransport(_ transport: UInt?, for account: pjsua_acc_id) {
+    registrationTransportLock.lock()
+    registrationTransports[account] = transport
+    registrationTransportLock.unlock()
+}
+
+/// The connection `account`'s registration went over at its last 2xx, while it lives; see
+/// ``PJSUA/registrationTransport(of:)``.
+func pjsuaRegistrationTransport(of account: pjsua_acc_id) -> UInt? {
+    registrationTransportLock.lock()
+    defer { registrationTransportLock.unlock() }
+    return registrationTransports[account]
+}
+
+/// The connection `regc` last sent over (`pjsip_regc_info.transport`), as an address: compared,
+/// never dereferenced, outside the callback that read it.
+private func sessionTransport(_ regc: OpaquePointer?) -> UInt? {
+    guard let regc else { return nil }
+    var state = pjsip_regc_info()
+    guard pjsip_regc_get_info(regc, &state).isSuccess, let transport = state.transport else {
+        return nil
+    }
+    return UInt(bitPattern: transport)
 }
 
 /// The Contact URIs a REGISTER response listed, printed as pjsip prints them. Reads the parsed
@@ -547,4 +595,65 @@ private func pjsuaOnIPChangeProgress(_ op: pjsua_ip_change_op,
     }
     emitCall(.ipChangeProgress(operation: operation, status: Int32(status),
                                account: account, call: call, transportID: transportID))
+}
+
+/// `on_transport_state` — a SIP transport changed state. It runs before pjsua's own handler, in
+/// several contexts (`docs/Threading-Validation.md`, addendum 2026-10-11 (b)): on the worker for a
+/// socket error, a failed keep-alive or a connect; on the sending thread, the engine's included,
+/// when an immediate send fails; and, for the shutdown that follows a disconnection or comes with
+/// an IP change, with the transport manager's and the transport's locks held. So it reads the
+/// transport's fixed fields, takes only its own leaf lock, and yields.
+private func pjsuaOnTransportState(_ transport: UnsafeMutablePointer<pjsip_transport>?,
+                                   _ state: pjsip_transport_state,
+                                   _ info: UnsafePointer<pjsip_transport_state_info>?) {
+    assertOnRegisteredPJThread()
+    guard let transport else { return }
+    let newState = TransportState(state)
+    let address = UInt(bitPattern: transport)
+    registrationTransportLock.lock()
+    let accounts = registrationTransports.filter { $0.value == address }.map(\.key).sorted()
+    if newState == .disconnected || newState == .destroyed {
+        for account in accounts { registrationTransports[account] = nil }
+    }
+    registrationTransportLock.unlock()
+
+    let remote = transport.pointee.remote_name
+    emitCall(.transportState(TransportStateChange(
+        transport: TransportInstanceID(transport),
+        state: newState,
+        status: info?.pointee.status ?? 0,
+        type: transport.pointee.type_name.map { String(cString: $0) } ?? "?",
+        remote: "\(remote.host.string ?? ""):\(remote.port)",
+        registeredAccounts: accounts.map(AccountID.init),
+        tlsVerifyStatus: tlsVerifyStatus(transport, info)
+    )))
+}
+
+/// The peer certificate's verify status on a TLS transport. pjsip sets `ext_info` to a
+/// `pjsip_tls_state_info` for TLS connects and disconnections, when the socket can still be read
+/// (`sip_transport_tls.c`, `tls_init_shutdown`); never for other transports.
+private func tlsVerifyStatus(_ transport: UnsafeMutablePointer<pjsip_transport>,
+                             _ info: UnsafePointer<pjsip_transport_state_info>?) -> UInt32? {
+    let type = pjsip_transport_type_e(rawValue: UInt32(truncatingIfNeeded: transport.pointee.key.type))
+    guard type == PJSIP_TRANSPORT_TLS || type == PJSIP_TRANSPORT_TLS6,
+          let tls = info?.pointee.ext_info?.assumingMemoryBound(to: pjsip_tls_state_info.self)
+    else { return nil }
+    return tls.pointee.ssl_sock_info?.pointee.verify_status
+}
+
+/// `on_rejected_incoming_call` — pjsua refused an incoming INVITE itself, so `on_incoming_call`
+/// never fires for it. Worker thread, `PJSUA_LOCK` held. `rdata` is valid only here, so the
+/// Call-ID is read now: a VoIP push reported the call under it (`SwiftPJSUAKit`).
+private func pjsuaOnRejectedIncomingCall(
+    _ param: UnsafePointer<pjsua_on_rejected_incoming_call_param>?
+) {
+    assertOnRegisteredPJThread()
+    guard let param else { return }
+    emitCall(.incomingCallRejected(
+        call: param.pointee.call_id >= 0 ? CallID(param.pointee.call_id) : nil,
+        sipCallID: param.pointee.rdata?.pointee.msg_info.cid?.pointee.id.string,
+        from: param.pointee.remote_info.string,
+        statusCode: param.pointee.st_code,
+        statusText: param.pointee.st_text.string ?? ""
+    ))
 }

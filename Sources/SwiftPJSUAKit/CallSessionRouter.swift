@@ -489,6 +489,14 @@ public actor CallSessionRouter {
             // calls re-INVITE transparently, hangups arrive as normal .disconnected
             // events, and CallKit never learns an IP changed.
             break
+
+        case let .incomingCallRejected(_, sipCallID, _, _, _):
+            await withdrawRejectedReport(sipCallID: sipCallID)
+
+        case .transportState:
+            // A connection's state is the app's to act on (TD-24, offhook OH-12): a dead
+            // connection does not end a call, and CallKit has no word for "connection lost".
+            break
         }
     }
 
@@ -639,6 +647,22 @@ public actor CallSessionRouter {
             pending[uuid] = nil
             locallyEnded.remove(uuid)
         }
+    }
+
+    /// pjsua refused an INVITE itself (no free call slot, an offer it cannot answer), so
+    /// `.incomingCall` never fires for it. If a VoIP push already reported that call, end the
+    /// report now rather than let it ring until ``sweepExpiredPending()``.
+    ///
+    /// Only a resolved report with no engine call bound: a call already bound ends through its
+    /// own `.disconnected`, and a report still in flight is left to the sweep, because evicting
+    /// it would strand the call CallKit is about to accept.
+    private func withdrawRejectedReport(sipCallID: String?) async {
+        guard let sipCallID, !sipCallID.isEmpty else { return }
+        let uuid = CallIdentity.uuid(serverProvided: nil, sipCallID: sipCallID)
+        guard let entry = await registry.entry(for: uuid), entry.call == nil, entry.reported
+        else { return }
+        provider.reportCall(with: uuid, endedAt: nil, reason: .failed)
+        await evict(uuid: uuid)
     }
 
     private func evict(uuid: UUID) async {

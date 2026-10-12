@@ -6,7 +6,7 @@ import XCTest
 /// written before a field existed still decode, and each value reaches the wire in the first
 /// REGISTER — ``AccountConfiguration/registrationTimeout`` as its `Expires`,
 /// ``AccountConfiguration/instanceID`` and ``AccountConfiguration/usesSIPOutbound`` in its
-/// `Contact` and `Supported` headers.
+/// `Contact` and `Supported` headers, and the Contact again in the un-REGISTER.
 final class AccountConfigurationTests: XCTestCase {
 
     private final class Lines: @unchecked Sendable {
@@ -126,6 +126,52 @@ final class AccountConfigurationTests: XCTestCase {
         XCTAssertTrue(contact.contains(Self.instanceParameter), contact)
         XCTAssertTrue(contact.contains("reg-id=1"), contact)
         XCTAssertTrue(header("Supported", in: register)?.contains("outbound") ?? false)
+    }
+
+    // MARK: Contact lifecycle
+
+    /// What `usesSIPOutbound` is for. With a configured instance ID and outbound off, the
+    /// un-REGISTER carries the first REGISTER's Contact unchanged, so a registrar that keys on the
+    /// instance, on `reg-id` or on the URI matches it either way. The scripted registrar answers over
+    /// TCP without `Require: outbound`: the answer after which pjsua changes the Contact when
+    /// outbound is on.
+    func testContactIsUnchangedFromRegisterToUnregisterWithoutOutbound() async throws {
+        let (first, unregister) = try await registerThenUnregister(usesSIPOutbound: false)
+        XCTAssertEqual(first, unregister)
+        XCTAssertTrue(first.contains(Self.instanceParameter), first)
+    }
+
+    /// The contrast. With outbound on, the first REGISTER offers `reg-id`, and the un-REGISTER that
+    /// follows an unconfirming 200 drops it while keeping the configured instance ID. On a registrar
+    /// keying bindings on (instance, `reg-id`) that un-REGISTER matches nothing.
+    func testOutboundOnDropsRegIDAfterAnUnconfirmingAnswer() async throws {
+        let (first, unregister) = try await registerThenUnregister(usesSIPOutbound: true)
+        XCTAssertTrue(first.contains("reg-id=1"), first)
+        XCTAssertFalse(unregister.contains("reg-id"), unregister)
+        XCTAssertTrue(unregister.contains(Self.instanceParameter), unregister)
+    }
+
+    /// Adds an account with the instance ID against a scripted TCP registrar, waits for its 200,
+    /// removes it, and returns the Contact of the first REGISTER and of the un-REGISTER as the
+    /// registrar received them.
+    private func registerThenUnregister(usesSIPOutbound: Bool) async throws -> (String, String) {
+        let registrar = try ScriptedRegistrar(over: .tcp) { _, _ in (.ok, after: .zero) }
+        defer { registrar.stop() }
+        let engine = PJSUA()
+        self.engine = engine
+        try await engine.start(PJSUA.Configuration())
+
+        let id = try await engine.addAccount(
+            account(registrar: "sip:127.0.0.1:\(registrar.port);transport=tcp",
+                    instanceID: Self.instanceID,
+                    usesSIPOutbound: usesSIPOutbound),
+            credentials: InlineCredentialStore(password: "unused"))
+        try await engine.removeAccount(id)
+
+        let requests = registrar.requests
+        let first = try XCTUnwrap(requests.first { !$0.isUnregister }?.contact, "\(requests)")
+        let unregister = try XCTUnwrap(requests.last { $0.isUnregister }?.contact, "\(requests)")
+        return (first, unregister)
     }
 
     // MARK: Harness

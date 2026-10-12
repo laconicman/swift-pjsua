@@ -260,9 +260,9 @@ final class EventRelayTests: XCTestCase {
         XCTAssertFalse(known)
     }
 
-    /// A report CallKit has not answered yet is left to the sweep: evicting it would strand the
-    /// call CallKit is about to accept.
-    func testRejectedInviteLeavesAReportInFlight() async {
+    /// A rejection that arrives while CallKit is still answering the report must not evict it, which
+    /// would strand the call CallKit is about to accept; the call ends once CallKit accepts.
+    func testRejectedInviteDuringTheReportEndsItOnceAccepted() async {
         let router = makeRouter()
         let sipCallID = "in-flight@127.0.0.1"
         let uuid = CallIdentity.uuid(serverProvided: nil, sipCallID: sipCallID)
@@ -270,9 +270,13 @@ final class EventRelayTests: XCTestCase {
 
         await router.handle(.incomingCallRejected(call: nil, sipCallID: sipCallID, from: nil,
                                                   statusCode: 486, statusText: "Busy Here"))
+        let keptWhileReporting = await router.isKnownCall(uuid)
+        XCTAssertTrue(keptWhileReporting)
 
+        let epoch = await router.resetEpoch
+        await router.concludeAcceptedReport(uuid: uuid, epoch: epoch)
         let known = await router.isKnownCall(uuid)
-        XCTAssertTrue(known)
+        XCTAssertFalse(known)
     }
 
     func testConcludeAcceptedReportWithCurrentEpochMarksReported() async {

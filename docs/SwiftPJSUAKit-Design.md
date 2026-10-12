@@ -316,9 +316,9 @@ Already scaffolded (`CallIdentity` + `CallRegistry`); this milestone makes it lo
   push whose INVITE never arrives can't leak. This closes the documented `CallRegistry` gap.
 - **An INVITE pjsua refuses itself (2026-10-12):** no free call slot, an offer it cannot answer.
   `.incomingCall` never fires for it, so the router ends a push-reported call on
-  `.incomingCallRejected` instead of at the sweep. Only a resolved report with no `CallID` bound:
-  a report CallKit has not answered yet is left to the sweep, since evicting it would strand the
-  call CallKit is about to accept.
+  `.incomingCallRejected` instead of at the sweep, provided no `CallID` is bound. A report CallKit
+  has not answered yet is not evicted, since that would strand the call CallKit is about to accept:
+  the rejection is remembered, and the call ends as soon as CallKit accepts.
 
 No new sign-off; this is finishing the scaffolded design.
 

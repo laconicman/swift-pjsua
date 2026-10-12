@@ -132,6 +132,10 @@ public actor CallSessionRouter {
     /// `.callState(.disconnected)` we must NOT re-report to CallKit (it would be a duplicate).
     private var locallyEnded: Set<UUID> = []
 
+    /// Push reports whose INVITE pjsua refused while CallKit was still answering the report: ended
+    /// as soon as ``concludeAcceptedReport(uuid:epoch:)`` sees CallKit accept.
+    private var rejectedDuringReport: Set<UUID> = []
+
     /// Local-conference membership (design §7.1): for each grouped call, the set of *other*
     /// calls its audio is bridged to. Symmetric (if A↔B then B∈adjacency[A] and A∈adjacency[B]).
     /// Drives N-way local mixing — a new member is cross-connected to every existing member of
@@ -275,8 +279,15 @@ public actor CallSessionRouter {
     /// `firstSeen` swallows the re-INVITE that should re-ring.
     /// Internal for the same @testable reason as `handle(_:)`.
     func concludeAcceptedReport(uuid: UUID, epoch: Int) async {
+        let rejected = rejectedDuringReport.remove(uuid) != nil
         if epoch == resetEpoch {
             await registry.markReported(uuid: uuid)
+            // pjsua refused the INVITE while CallKit was answering: end the call it just accepted,
+            // unless an INVITE has bound it since.
+            if rejected, await registry.entry(for: uuid)?.call == nil {
+                provider.reportCall(with: uuid, endedAt: nil, reason: .failed)
+                await evict(uuid: uuid)
+            }
         } else {
             await registry.remove(uuid: uuid)
         }
@@ -398,6 +409,7 @@ public actor CallSessionRouter {
         pending.removeAll()
         uuidByCall.removeAll()
         locallyEnded.removeAll()
+        rejectedDuringReport.removeAll()
         groupAdjacency.removeAll()
         // Only reports still in flight survive: bound entries and resolved reports point
         // at calls the reset killed, and keeping them would both leak `isKnownCall` and
@@ -653,14 +665,17 @@ public actor CallSessionRouter {
     /// `.incomingCall` never fires for it. If a VoIP push already reported that call, end the
     /// report now rather than let it ring until ``sweepExpiredPending()``.
     ///
-    /// Only a resolved report with no engine call bound: a call already bound ends through its
-    /// own `.disconnected`, and a report still in flight is left to the sweep, because evicting
-    /// it would strand the call CallKit is about to accept.
+    /// Only a report with no engine call bound: a bound call ends through its own `.disconnected`.
+    /// A report CallKit is still answering is not evicted, which would strand the call CallKit is
+    /// about to accept; it is ended once ``concludeAcceptedReport(uuid:epoch:)`` sees it accepted.
     private func withdrawRejectedReport(sipCallID: String?) async {
         guard let sipCallID, !sipCallID.isEmpty else { return }
         let uuid = CallIdentity.uuid(serverProvided: nil, sipCallID: sipCallID)
-        guard let entry = await registry.entry(for: uuid), entry.call == nil, entry.reported
-        else { return }
+        guard let entry = await registry.entry(for: uuid), entry.call == nil else { return }
+        guard entry.reported else {
+            rejectedDuringReport.insert(uuid)
+            return
+        }
         provider.reportCall(with: uuid, endedAt: nil, reason: .failed)
         await evict(uuid: uuid)
     }
@@ -670,6 +685,7 @@ public actor CallSessionRouter {
         await registry.remove(uuid: uuid)
         pending[uuid] = nil
         locallyEnded.remove(uuid)
+        rejectedDuringReport.remove(uuid)
         // Drop the call from any local conference. The engine tears the leg's conference slot
         // down on hangup, so its bridge links vanish automatically; only the bookkeeping needs
         // clearing here (no engine disconnect on a dead leg).

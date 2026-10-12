@@ -314,6 +314,11 @@ Already scaffolded (`CallIdentity` + `CallRegistry`); this milestone makes it lo
 - **TTL/eviction (PR #1 finding #4):** the router now evicts on terminal `.callState(.disconnected)`
   and on `CXEndCallAction`; additionally stamp entries and sweep > ~45s (push→INVITE window) so a
   push whose INVITE never arrives can't leak. This closes the documented `CallRegistry` gap.
+- **An INVITE pjsua refuses itself (2026-10-12):** no free call slot, an offer it cannot answer.
+  `.incomingCall` never fires for it, so the router ends a push-reported call on
+  `.incomingCallRejected` instead of at the sweep. Only a resolved report with no `CallID` bound:
+  a report CallKit has not answered yet is left to the sweep, since evicting it would strand the
+  call CallKit is about to accept.
 
 No new sign-off; this is finishing the scaffolded design.
 

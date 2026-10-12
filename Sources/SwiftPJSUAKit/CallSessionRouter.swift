@@ -279,17 +279,19 @@ public actor CallSessionRouter {
     /// `firstSeen` swallows the re-INVITE that should re-ring.
     /// Internal for the same @testable reason as `handle(_:)`.
     func concludeAcceptedReport(uuid: UUID, epoch: Int) async {
-        let rejected = rejectedDuringReport.remove(uuid) != nil
         if epoch == resetEpoch {
             await registry.markReported(uuid: uuid)
             // pjsua refused the INVITE while CallKit was answering: end the call it just accepted,
-            // unless an INVITE has bound it since.
-            if rejected, await registry.entry(for: uuid)?.call == nil {
+            // unless an INVITE has bound it since. Read after the await, which a rejection can run
+            // into; from here on a rejection sees the report resolved and ends the call itself.
+            if rejectedDuringReport.remove(uuid) != nil,
+               await registry.entry(for: uuid)?.call == nil {
                 provider.reportCall(with: uuid, endedAt: nil, reason: .failed)
                 await evict(uuid: uuid)
             }
         } else {
             await registry.remove(uuid: uuid)
+            rejectedDuringReport.remove(uuid)
         }
     }
 

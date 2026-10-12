@@ -180,8 +180,9 @@ extension PJSUA {
     }
 
     /// The connection `account`'s registration went over at its last 2xx; `nil` when the account
-    /// is not registered, or since that connection was reported ``TransportState/disconnected`` or
-    /// ``TransportState/destroyed``. Match it against ``PJSUAEvent/transportState(_:)``: while the
+    /// is not registered, since that connection was reported ``TransportState/disconnected`` or
+    /// ``TransportState/destroyed``, or since a credential or Contact change replaced the session
+    /// and before its next 2xx. Match it against ``PJSUAEvent/transportState(_:)``: while the
     /// app is active, a ``TransportState/connected`` for it since the app last became active shows
     /// the connection has not been through a suspension, which pjsua has no getter for
     /// (`docs/Tech-Debt.md` TD-31; offhook OH-12). In the background it shows nothing: the app can
@@ -211,6 +212,7 @@ extension PJSUA {
         }
         _ = try liveParameters(account, generation: generation)
         try pjsua_acc_del(account.raw).throwIfFailed()
+        pjsuaForgetRegistrationTransport(of: account.raw)
         accountParameters[account] = nil
         registration.sessions[account] = nil
         markRegistrationDispatched(operation)
@@ -271,6 +273,9 @@ extension PJSUA {
         // Only the fields we own; everything else stays as pjsua has it.
         let owners = applyOwnedFields(to: &acc, config: params.config, secret: secret)
         acc.disable_reg_on_modify = true.pjBool
+        // A changed credential or Contact makes pjsua discard the session here, reporting nothing;
+        // the REGISTER the caller sends next records the connection again.
+        pjsuaForgetRegistrationTransport(of: account.raw)
         try withExtendedLifetime(owners) {
             _ = try pjsua_acc_modify(account.raw, &acc).throwIfFailed()
         }

@@ -179,6 +179,18 @@ extension PJSUA {
         }
     }
 
+    /// The connection `account`'s registration went over at its last 2xx; `nil` when the account
+    /// is not registered, since that connection was reported ``TransportState/disconnected`` or
+    /// ``TransportState/destroyed``, or since a credential or Contact change replaced the session
+    /// and before its next 2xx. Match it against ``PJSUAEvent/transportState(_:)``: while the
+    /// app is active, a ``TransportState/connected`` for it since the app last became active shows
+    /// the connection has not been through a suspension, which pjsua has no getter for
+    /// (`docs/Tech-Debt.md` TD-31; offhook OH-12). In the background it shows nothing: the app can
+    /// be suspended there with no callback.
+    public func registrationTransport(of account: AccountID) -> TransportInstanceID? {
+        pjsuaRegistrationTransport(of: account.raw).map(TransportInstanceID.init(raw:))
+    }
+
     private func removeAccountSteps(_ account: AccountID,
                                     generation: UInt64,
                                     operation: UInt64) async throws {
@@ -200,6 +212,7 @@ extension PJSUA {
         }
         _ = try liveParameters(account, generation: generation)
         try pjsua_acc_del(account.raw).throwIfFailed()
+        pjsuaForgetRegistrationTransport(of: account.raw)
         accountParameters[account] = nil
         registration.sessions[account] = nil
         markRegistrationDispatched(operation)
@@ -263,9 +276,24 @@ extension PJSUA {
         try withExtendedLifetime(owners) {
             _ = try pjsua_acc_modify(account.raw, &acc).throwIfFailed()
         }
+        // A changed credential or Contact makes pjsua discard the session here, reporting nothing.
+        // Forget its connection only then: a session that survived still goes over it. The
+        // REGISTER the caller sends next records the connection again either way.
+        if !hasRegistrationSession(account) {
+            pjsuaForgetRegistrationTransport(of: account.raw)
+        }
         params.appliedPush = params.config.push
         accountParameters[account] = params
         return params.config.push
+    }
+
+    /// Whether pjsua still has a registration session for `account`. `pjsua_acc_get_info()`
+    /// reports `expires` as `PJSIP_EXPIRES_NOT_SPECIFIED`, a cast macro Swift does not import,
+    /// exactly when the account has none, as `resyncRegistration` reads it too.
+    private func hasRegistrationSession(_ account: AccountID) -> Bool {
+        var info = pjsua_acc_info()
+        guard pjsua_acc_get_info(account.raw, &info).isSuccess else { return false }
+        return info.expires != UInt32.max
     }
 
     // MARK: Config building

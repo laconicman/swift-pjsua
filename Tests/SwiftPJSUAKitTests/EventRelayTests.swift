@@ -243,6 +243,42 @@ final class EventRelayTests: XCTestCase {
         XCTAssertFalse(known)
     }
 
+    /// An INVITE pjsua refused itself never reaches `.incomingCall`, so a VoIP push that already
+    /// reported it would ring until the pending sweep. The router ends that report at once.
+    func testRejectedInviteWithdrawsTheReportedPush() async {
+        let router = makeRouter()
+        let sipCallID = "rejected@127.0.0.1"
+        let uuid = CallIdentity.uuid(serverProvided: nil, sipCallID: sipCallID)
+        await router.seedRegistryEntry(uuid)
+        let epoch = await router.resetEpoch
+        await router.concludeAcceptedReport(uuid: uuid, epoch: epoch)
+
+        await router.handle(.incomingCallRejected(call: nil, sipCallID: sipCallID, from: nil,
+                                                  statusCode: 486, statusText: "Busy Here"))
+
+        let known = await router.isKnownCall(uuid)
+        XCTAssertFalse(known)
+    }
+
+    /// A rejection that arrives while CallKit is still answering the report must not evict it, which
+    /// would strand the call CallKit is about to accept; the call ends once CallKit accepts.
+    func testRejectedInviteDuringTheReportEndsItOnceAccepted() async {
+        let router = makeRouter()
+        let sipCallID = "in-flight@127.0.0.1"
+        let uuid = CallIdentity.uuid(serverProvided: nil, sipCallID: sipCallID)
+        await router.seedRegistryEntry(uuid)
+
+        await router.handle(.incomingCallRejected(call: nil, sipCallID: sipCallID, from: nil,
+                                                  statusCode: 486, statusText: "Busy Here"))
+        let keptWhileReporting = await router.isKnownCall(uuid)
+        XCTAssertTrue(keptWhileReporting)
+
+        let epoch = await router.resetEpoch
+        await router.concludeAcceptedReport(uuid: uuid, epoch: epoch)
+        let known = await router.isKnownCall(uuid)
+        XCTAssertFalse(known)
+    }
+
     func testConcludeAcceptedReportWithCurrentEpochMarksReported() async {
         let router = makeRouter()
         let uuid = UUID()

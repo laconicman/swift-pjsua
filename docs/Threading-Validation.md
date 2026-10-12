@@ -34,8 +34,9 @@ synchronous re-entry would deadlock, not merely race.
 
 | Callback | Lock state when invoked |
 |---|---|
-| `on_reg_state`, `on_reg_state2`, `on_reg_started2`, `on_ip_change_progress`, `on_incoming_call` | **`PJSUA_LOCK` held** |
+| `on_reg_state`, `on_reg_state2`, `on_reg_started2`, `on_ip_change_progress`, `on_incoming_call`, `on_rejected_incoming_call` | **`PJSUA_LOCK` held** |
 | `on_call_state`, `on_call_tsx_terminate_session`, `on_mwi_state`, `on_auth_challenge` | no `PJSUA_LOCK`, but dialog/tsx `grp_lock` held upstream |
+| `on_transport_state` | depends on the path: none for a socket error; the transport manager's and the transport's locks for a shutdown, plus `PJSUA_LOCK` inside an IP change (addendum 2026-10-11 (b)) |
 
 Documented order is **`PJSUA_LOCK` > dialog `grp_lock` > tsx `grp_lock`**; calling *up* that order
 from inside a callback is an ABBA inversion. `on_call_tsx_terminate_session`'s header states the
@@ -68,7 +69,8 @@ which is the point of preventing re-entrancy by construction rather than by conv
 ## Related
 
 `Configuration-Design.md` (D-CONFIG-2 uses the same prevent-by-construction approach for actor
-re-entrancy); `Tech-Debt.md` TD-19; `PJSUACallbacks.swift` carries the callback table inline.
+re-entrancy); `Tech-Debt.md` TD-19; `PJSUACallbacks.swift` carries the callback table inline;
+[Callback-Inventory](./Callback-Inventory.md) lists every pjsua callback, installed or not.
 
 ## Addendum 2026-08-17 — two contexts found while mapping call termination
 
@@ -119,6 +121,12 @@ against `288de6142`, the source of the shipped binary.
   reads it, so G2 holds: a callback yields and returns.
 
 ## Addendum 2026-10-11 (b) — callbacks not installed yet
+
+**2026-10-12:** `on_transport_state` and `on_rejected_incoming_call` are now installed, as
+`PJSUAEvent.transportState` and `.incomingCallRejected`. The binary is now `swift-pjsip` 0.3.0
+(PJSIP master `bd69054a6`); the contexts below hold there too, re-read for the two installed
+callbacks, though the line numbers are `288de6142`'s. Every callback, installed or not:
+[Callback-Inventory](./Callback-Inventory.md).
 
 Verified against `288de6142` (master `bd69054a6` where noted) for the callbacks TD-31 may wire. With
 `thread_cnt = 1` the worker polls the SIP ioqueue and the timer heap; ICE uses the same ioqueue and

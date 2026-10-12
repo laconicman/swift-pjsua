@@ -64,6 +64,18 @@ public enum PJSUAEvent: Sendable {
     /// account steps, `call` alongside it for the two call steps.
     case ipChangeProgress(operation: IPChangeOperation, status: Int32,
                           account: AccountID?, call: CallID?, transportID: Int32?)
+
+    /// A SIP transport changed state (`on_transport_state`): for TCP and TLS, a connection came
+    /// up, went down, is shutting down or was destroyed. See ``TransportStateChange``.
+    case transportState(TransportStateChange)
+
+    /// pjsua refused an incoming INVITE by itself (`on_rejected_incoming_call`): no free call
+    /// slot, an offer it cannot answer, a media failure. ``incomingCall`` never fires for such an
+    /// INVITE, so this is its only report. `call` is set when pjsua had given it a call slot,
+    /// `sipCallID` is the INVITE's `Call-ID`, `from` the caller, and `statusCode`/`statusText`
+    /// the final response pjsua sent.
+    case incomingCallRejected(call: CallID?, sipCallID: String?, from: String?,
+                              statusCode: Int32, statusText: String)
 }
 
 /// The `pjsua_ip_change_op` step currently being reported by `.ipChangeProgress`.

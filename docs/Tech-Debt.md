@@ -289,6 +289,11 @@ needed to *observe* the failure modes, per the sequencing note below. `on_transp
 `on_call_media_transport_state`/`on_ice_transport_error` remain unwired, and the local-hangup
 regression test now exists (`offhook` `test07`). The rest of this entry stands.
 
+**2026-10-12: `on_transport_state` is installed** as `PJSUAEvent.transportState`
+(``TransportStateChange``), naming the accounts whose registration went over a connection that
+died (TD-31). It still says nothing about which *call* died: a dialog has no transport listener.
+`on_call_media_transport_state`/`on_ice_transport_error` stay unwired until ICE with TURN is on.
+
 We originally installed four callbacks. The consequence, mapped in
 [Call-Termination-Paths](./Call-Termination-Paths.md): **every path that ends a call is covered, and
 every path that kills a call *without ending it* is invisible.**
@@ -418,6 +423,12 @@ for the plain suspend/resume case, since nothing about the IP necessarily change
 - **Not verified — wants a device test:** how long detection actually takes after resume, whether
   a queued send fails fast or hangs to transaction timeout, and whether UDP's NAT binding shows the
   same class of false confidence (no connection state, so probably a different failure shape).
+- **Observable since 2026-10-12, still not earlier:** `PJSUAEvent.transportState` reports the
+  disconnection when pjsip notices it, with the accounts it took down, and
+  `registrationTransport(of:)` names each account's connection, so while the app is active a
+  `.connected` for it since the app last became active proves it has not been through a suspension.
+  Neither makes pjsip notice sooner, and in the background neither proves anything; the device test
+  above still decides the policy (issue #28).
 - Relates: TD-19 (a TLS listener restart drops its credentials — but **not** via this path:
   `pjsua_handle_ip_change()`'s `restart_listener()` passes a NULL `opt`, preserving credentials
   by construction; the hazard is only our own `pjsua_transport_lis_restart()`), TD-22 (439),
@@ -428,24 +439,26 @@ pjsua keeps state the engine needs for decisions and exposes no getter for it, o
 reading under pjsua's threading can catch it mid-change. `pjsua_acc_get_info` reads nothing but the
 last status and `next_reg`. The engine keeps two such states from callbacks: each account's session
 ([Registration-Lifecycle](./Registration-Lifecycle.md)) and the IP-change sequence. The rest is
-listed here and wired when a decision needs it. Of `pjsua_callback`'s 59 members (PJSIP 2.17.0;
-master adds `on_call_siprec_metadata_update`) the engine installs 10; contexts of the ones below are
-in [Threading-Validation](./Threading-Validation.md).
+listed here and wired when a decision needs it. Of `pjsua_callback`'s 60 members (59 in PJSIP
+2.17.0; master added `on_call_siprec_metadata_update`) the engine installs 12; every member, with
+what it conveys and when it is worth wiring, is in [Callback-Inventory](./Callback-Inventory.md),
+and the contexts of the ones below are in [Threading-Validation](./Threading-Validation.md).
 
 | State | Reachable through | Silent when | Wire when |
 |---|---|---|---|
-| The account's TCP/TLS connection | `on_transport_state`, matched against `pjsip_regc_get_info(regc).transport` read in `on_reg_state2`. The regc holds a reference on it, and the app's callback runs before pjsua's own handler | while suspended (nothing is sent); pjsua's own reaction to `DISCONNECTED` (releases the transport, demotes outbound, arms a retry) has no callback | TD-24's resume policy or OH-12's "skip `ip_change` when the connection is fresh": a `CONNECTED` after the last resume is the freshness proof pjsua has no getter for |
-| An INVITE pjsua refused itself | `on_rejected_incoming_call` (`rdata` carries the Call-ID) | — `on_incoming_call` never fires for it | the Kit ends a push-reported call now instead of on the pending-entry sweep |
-| An auth challenge outstanding | `on_auth_challenge` | a deferred REGISTER challenge clears `has_tsx`, so `is_busy` reads idle | credential-on-demand (TD-11). **2.17.0's deferred path was a use-after-free for REGISTER** (upstream `5c605b499`, #5251); fixed in the binary since `swift-pjsip` 0.3.0 |
+| The account's TCP/TLS connection | **wired 2026-10-12:** `.transportState`, whose `registeredAccounts` match it against `pjsip_regc_get_info(regc).transport` read in `on_reg_state2` (the regc holds a reference on it, and the app's callback runs before pjsua's own handler); `registrationTransport(of:)` names each account's connection | while suspended (nothing is sent); pjsua's own reaction to `DISCONNECTED` (releases the transport, demotes outbound, arms a retry) has no callback, and the event is the only report of it | for TD-24's resume policy and OH-12's "skip `ip_change` when the connection is fresh": while the app is active, a `.connected` for `registrationTransport(of:)` since it last became active is the freshness proof pjsua has no getter for |
+| An INVITE pjsua refused itself | **wired 2026-10-12:** `.incomingCallRejected`, carrying the Call-ID read from `rdata` | — `on_incoming_call` never fires for it | done: the Kit ends a push-reported call at once instead of at the pending-entry sweep |
+| An auth challenge outstanding | `on_auth_challenge` | a deferred REGISTER challenge clears `has_tsx`, so `is_busy` reads idle; the engine's session state must count it as busy | credential-on-demand (TD-11). **2.17.0's deferred path was a use-after-free for REGISTER** (upstream `5c605b499`, #5251); fixed in the binary since `swift-pjsip` 0.3.0 |
 | An automatic retry pending | inferred: a failure settlement with a retryable code (408, 480, 500, 502–504, 6xx) or a 439 to an outbound REGISTER, while `reg_retry_interval` ≠ 0 and no IP change; or the session transport's `DISCONNECTED` | arming; re-arming after the timer's own send fails | a decision that must not race the retry (Registration-Lifecycle §3.1) |
-| A Contact rewritten | inferred: a pjsua-thread `on_reg_started2` while the engine's own send is unsettled (the 2xx was swallowed); the rewrite's settlement lists the new Contact | the swallowed 2xx; with ALWAYS_UPDATE, the rewrite on a ≥ 400 answer | a decision on the registered Contact |
+| A Contact rewritten | inferred: a pjsua-thread `on_reg_started2` while the engine's own send is unsettled (the 2xx was swallowed); the rewrite's settlement lists the new Contact | the swallowed 2xx; with ALWAYS_UPDATE, the rewrite on a ≥ 400 answer; with the UNREGISTER method, the un-REGISTER's answer, so its start never settles ([pjsip/pjproject#5333](https://github.com/pjsip/pjproject/issues/5333); the engine keeps that method out until it is fixed, [#33](https://github.com/laconicman/swift-pjsua/issues/33)) | a decision on the registered Contact |
 | The outbound flow (`rfc5626_status`) | recomputable from the 2xx in `on_reg_state2` (`Require: outbound`), given outbound was offered | demotion on transport loss | an outbound-specific reachability decision |
 | The server-affinity pin | none (setter and clearer only) | always | when `server_affinity` is exposed; impose it with the setter rather than observe it |
-| ICE / TURN health | `on_call_media_transport_state`, `on_ice_transport_error` | **always for the peer path**: `KEEP_ALIVE` means a TURN refresh failure only, a STUN keep-alive failure after init is dropped, and the keep-alive to the peer is a Binding Indication with no response | OH-4 (ICE with TURN). Not a media-liveness detector: that stays the RTP counter (TD-27) |
+| ICE / TURN health | `on_call_media_transport_state`, `on_ice_transport_error` | **always for the peer path**: `KEEP_ALIVE` means a TURN refresh failure only, a STUN keep-alive failure after init is dropped ([pjsip/pjproject#5334](https://github.com/pjsip/pjproject/issues/5334)), and the keep-alive to the peer is a Binding Indication with no response | OH-4 (ICE with TURN). Not a media-liveness detector: that stays the RTP counter (TD-27) |
 
-- **How to wire:** as the session state was wired. The callback yields a `Sendable` value on the
-  engine's channel, the actor applies it in its own turn, and the callback's thread and locks go into
-  Threading-Validation first.
+- **How to wire:** state the engine decides on goes as the session state went: the callback yields
+  a `Sendable` value on the engine's channel and the actor applies it in its own turn. State only
+  the app acts on goes out as a `PJSUAEvent`, as the two wired on 2026-10-12 do. Either way the
+  callback's thread and locks go into Threading-Validation first.
 - **Not owed:** presence, IM, MWI, DTMF, transfer requests, SDP and stream hooks, media-transport
   factories, conference-op callbacks. Wire them with their features.
 - Relates: TD-9, TD-11, TD-24, TD-27, TD-32; offhook OH-4, OH-10, OH-12.

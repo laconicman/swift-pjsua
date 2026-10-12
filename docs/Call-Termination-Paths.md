@@ -271,12 +271,13 @@ Three delivery details that matter to a Swift wrapper:
 | ICE TURN-refresh failure (dedicated) | `on_ice_transport_error` | ❌ not installed |
 | Any `pjmedia_event`, incl. `MEDIA_TP_ERR`, `AUD_DEV_ERROR` | `on_call_media_event` | ✅ — ``CallMediaEvent`` (2026-08-18) |
 | Stream teardown + final statistics | `on_stream_destroyed` | ✅ — `.streamDestroyed` (2026-08-18) |
-| SIP transport up/down | `on_transport_state` | ❌ not installed |
+| SIP transport up/down | `on_transport_state` | ✅ — `.transportState`, naming the accounts registered over it (2026-10-12) |
 
-`SwiftPJSUA` installs six callbacks (`PJSUACallbacks.swift`): `on_call_state`,
+`SwiftPJSUA` first installed six callbacks (`PJSUACallbacks.swift`): `on_call_state`,
 `on_incoming_call`, `on_call_media_state`, `on_reg_state2`, and — added 2026-08-18 as the minimum
-needed to *observe* rows 9–13 — `on_stream_destroyed` and `on_call_media_event`. The remaining
-three are still unwired; [TD-27](./Tech-Debt.md) tracks the rest.
+needed to *observe* rows 9–13 — `on_stream_destroyed` and `on_call_media_event`. `on_transport_state`
+followed on 2026-10-12; the two ICE callbacks are still unwired, and [TD-27](./Tech-Debt.md) tracks
+them. Every callback, installed or not: [Callback-Inventory](./Callback-Inventory.md).
 
 ---
 
@@ -472,7 +473,7 @@ Tracked as [TD-27](./Tech-Debt.md). Ordered by value.
    it for the iOS socket-death case (TD-24); do not expect media liveness from it.
 3. **`on_transport_state`** — SIP transport up/down. Does not tell you which call died (nothing
    does), but it is the earliest signal that anything is wrong, and it is what a reconnect policy
-   keys off.
+   keys off. **Installed 2026-10-12** as `.transportState`.
 4. **`on_call_media_transport_state` / `on_ice_transport_error`** — a TURN-refresh failure and a NAT
    rebinding, once ICE with TURN is enabled. Not a peer-liveness signal (§4), but cheap to wire while
    the others are being added.

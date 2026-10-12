@@ -85,6 +85,11 @@ read POD and yield; G2 holds.
   returns.
 - **`ipChangeCompleted`**.
 
+The account's connection is reported separately, to the app: `.transportState` names the accounts
+a dying connection carried, which pjsua's own handler then releases from their sessions without a
+callback. The signals above do not take it in. What else pjsua reports only through callbacks:
+[Callback-Inventory](./Callback-Inventory.md), TD-31.
+
 ### Sessions and quiet
 
 Per account the engine keeps `unregistered`, `registered(refreshDue:)` or `pending`. Only signals

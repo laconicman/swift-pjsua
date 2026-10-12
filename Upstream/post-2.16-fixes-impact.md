@@ -47,7 +47,7 @@ behaviour were checked against source at `bd69054a6`. Only what touches our foot
 | ◐ | `9228b0301` (#5125) | A call's conference slot and state survive SDP renegotiation | Per-stream media events should no longer report a new slot after a re-INVITE; not yet observed |
 | ◐ | `3bc680a18` (#5325) | Ephemeral TLS and IPv6 ports are preserved | Our transports are ephemeral (port 0) |
 | ◐ | `16e09941a` (#5254) | Two keep-alive pongs from the server answered with a wrong pong | TCP/TLS keep-alive |
-| ○ | `8a5c8d7f9` (#5240) | Use-after-free in `inv_session_destroy()` | Not reachable from the engine, which touches no `pjsip_inv_*` / `pjsip_dlg_*` API; arrives anyway |
+| ○ | `8a5c8d7f9` (#5240) | Use-after-free in `inv_session_destroy()` when the last reference to an INVITE session is dropped outside a dialog lock | Not reachable as far as checked. pjsip drops the last reference itself only inside `pjsip_dlg_on_tsx_state()`, under the dialog lock; the crash needs a caller holding its own reference (`pjsip_inv_add_ref()`) and dropping it elsewhere. At `288de6142` no pjsua source takes one (every add/dec site is in `sip_inv.c`), and the engine calls no `pjsip_inv_*` API. That every `sip_inv.c` drop runs under the lock is upstream's statement, not audited here. Fixed in this binary regardless |
 | ○ | `068cf96ae` (#5205), `fcf0834e4` (#5203), `a7fa90f45` (#5269) | Media-event node leak on hangup; SRTP pool growth per SDES renegotiation; SRTP ROC retry after transport reinit | Calls with media events; SDES-SRTP |
 | ○ | `9fd0920c2` (#5211), `f4b8fea78` (#5225), `256f22d8d` (#5219) | 513 for an oversized request; Via `sent-by` fallback without `received`; missing Call-ID guard | Robustness against odd peers |
 

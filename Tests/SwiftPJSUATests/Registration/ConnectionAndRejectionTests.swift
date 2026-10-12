@@ -12,7 +12,10 @@ extension RegistrationTests {
     @Suite struct Connections {
 
         @Test func aDeadRegistrationConnectionNamesItsAccount() async throws {
-            let registrar = try ScriptedRegistrar(over: .tcp) { _, _ in (.ok, after: .zero) }
+            // The second REGISTER, the unchanged re-registration's, is answered late.
+            let registrar = try ScriptedRegistrar(over: .tcp) { _, index in
+                (.ok, after: index == 1 ? .milliseconds(1500) : .zero)
+            }
             var configuration = PJSUA.Configuration()
             configuration.transports = [.init("tcp", .tcp, port: 0)]
             let engine = PJSUA()
@@ -28,6 +31,16 @@ extension RegistrationTests {
                     events.transportChanges.contains { $0.state == .connected && $0.type == "TCP" }
                 }
                 let connected = events.transportChanges.first { $0.state == .connected }?.transport
+                #expect(await engine.registrationTransport(of: id) == connected)
+
+                // An unchanged re-registration keeps the session, so the connection stays named
+                // while its REGISTER waits for the answer.
+                try await engine.reRegister(id, wait: .dispatched)
+                #expect(await engine.registrationTransport(of: id) == connected)
+                try await RegistrationTests.eventually(within: .seconds(5)) {
+                    guard registrar.requests.count == 2 else { return false }
+                    return await RegistrationTests.isRegistered(id, in: engine)
+                }
                 #expect(await engine.registrationTransport(of: id) == connected)
 
                 registrar.stop()   // closes the connection

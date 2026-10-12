@@ -478,7 +478,7 @@ private func refreshDelay(of regc: OpaquePointer?) -> UInt32? {
 /// which nothing can tell. The session holds a reference on the transport until that release, so
 /// the address cannot be reused while an entry names it. Entries go on that connection's
 /// disconnection or destruction, on any settlement that leaves the account unregistered, and when
-/// the engine itself may discard the session without a settlement (`pjsua_acc_modify`,
+/// the engine's own call discarded the session without a settlement (`pjsua_acc_modify`,
 /// `pjsua_acc_del`, ``pjsuaForgetRegistrationTransport(of:)``).
 /// Guarded by `registrationTransportLock`: `on_transport_state` runs on the worker and on sending
 /// threads. A leaf lock: nothing is called while it is held.
@@ -499,8 +499,8 @@ func pjsuaRegistrationTransport(of account: pjsua_acc_id) -> UInt? {
     return registrationTransports[account]
 }
 
-/// Drop `account`'s entry before a call that may discard its session without a settlement: the
-/// session's reference was what kept the recorded address from being reused.
+/// Drop `account`'s entry after the engine's own call discarded its session without a settlement:
+/// the connection is no longer the registration's, and nothing will report that.
 func pjsuaForgetRegistrationTransport(of account: pjsua_acc_id) {
     recordRegistrationTransport(nil, for: account)
 }

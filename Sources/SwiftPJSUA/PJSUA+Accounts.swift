@@ -273,15 +273,27 @@ extension PJSUA {
         // Only the fields we own; everything else stays as pjsua has it.
         let owners = applyOwnedFields(to: &acc, config: params.config, secret: secret)
         acc.disable_reg_on_modify = true.pjBool
-        // A changed credential or Contact makes pjsua discard the session here, reporting nothing;
-        // the REGISTER the caller sends next records the connection again.
-        pjsuaForgetRegistrationTransport(of: account.raw)
         try withExtendedLifetime(owners) {
             _ = try pjsua_acc_modify(account.raw, &acc).throwIfFailed()
+        }
+        // A changed credential or Contact makes pjsua discard the session here, reporting nothing.
+        // Forget its connection only then: a session that survived still goes over it. The
+        // REGISTER the caller sends next records the connection again either way.
+        if !hasRegistrationSession(account) {
+            pjsuaForgetRegistrationTransport(of: account.raw)
         }
         params.appliedPush = params.config.push
         accountParameters[account] = params
         return params.config.push
+    }
+
+    /// Whether pjsua still has a registration session for `account`. `pjsua_acc_get_info()`
+    /// reports `expires` as `PJSIP_EXPIRES_NOT_SPECIFIED`, a cast macro Swift does not import,
+    /// exactly when the account has none, as `resyncRegistration` reads it too.
+    private func hasRegistrationSession(_ account: AccountID) -> Bool {
+        var info = pjsua_acc_info()
+        guard pjsua_acc_get_info(account.raw, &info).isSuccess else { return false }
+        return info.expires != UInt32.max
     }
 
     // MARK: Config building

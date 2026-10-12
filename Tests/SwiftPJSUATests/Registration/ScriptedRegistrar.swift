@@ -1,7 +1,9 @@
 import Foundation
 
-/// A UDP registrar on loopback that records each request and answers it by script — enough SIP
-/// to hold a REGISTER in flight, or challenge it, at a moment the test chooses.
+/// A registrar on loopback that records each request and answers it by script — enough SIP
+/// to hold a REGISTER in flight, or challenge it, at a moment the test chooses. UDP by default;
+/// over TCP it serves one connection at a time and never confirms SIP outbound (no
+/// `Require: outbound` in its 200s), which is the registrar most deployments have.
 ///
 /// It parses only what a REGISTER needs echoed and accepts any `Authorization` without checking
 /// it. Retransmissions (same Call-ID and CSeq) are neither recorded nor answered again.
@@ -37,9 +39,15 @@ final class ScriptedRegistrar: @unchecked Sendable {
     /// the requests recorded so far.
     typealias Script = @Sendable (_ request: Request, _ index: Int) -> (Answer, after: Duration)
 
+    /// Which transport the registrar listens on.
+    enum Wire: Sendable { case udp, tcp }
+
     let port: UInt16
 
+    private let wire: Wire
     private let socket: Int32
+    /// The accepted connection over TCP; `-1` while there is none.
+    private var connection: Int32 = -1
     private let script: Script
     private let lock = NSLock()
     private var recorded: [Request] = []
@@ -47,9 +55,10 @@ final class ScriptedRegistrar: @unchecked Sendable {
     private var stopped = false
     private let finished = DispatchSemaphore(value: 0)
 
-    init(script: @escaping Script) throws {
+    init(over wire: Wire = .udp, script: @escaping Script) throws {
+        self.wire = wire
         self.script = script
-        let fd = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
+        let fd = Darwin.socket(AF_INET, wire == .udp ? SOCK_DGRAM : SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
 
         var address = sockaddr_in()
@@ -59,7 +68,8 @@ final class ScriptedRegistrar: @unchecked Sendable {
         var length = socklen_t(MemoryLayout<sockaddr_in>.size)
         let bound = withUnsafeMutablePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, length) == 0 && getsockname(fd, $0, &length) == 0
+                bind(fd, $0, length) == 0 && (wire == .udp || listen(fd, 4) == 0)
+                    && getsockname(fd, $0, &length) == 0
             }
         }
         guard bound else {
@@ -73,7 +83,7 @@ final class ScriptedRegistrar: @unchecked Sendable {
         var timeout = timeval(tv_sec: 0, tv_usec: 100_000)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
-        Thread.detachNewThread { [self] in receiveLoop() }
+        Thread.detachNewThread { [self] in wire == .udp ? receiveLoop() : receiveStreamLoop() }
     }
 
     /// Every request so far, retransmissions excluded, in arrival order.
@@ -85,7 +95,10 @@ final class ScriptedRegistrar: @unchecked Sendable {
         lock.withLock { stopped = true }
         finished.wait()
         // Under the lock, so a delayed answer cannot write to a closed (or reused) descriptor.
-        lock.withLock { _ = close(socket) }
+        lock.withLock {
+            if connection >= 0 { _ = close(connection) }
+            _ = close(socket)
+        }
     }
 
     // MARK: Wire
@@ -102,12 +115,45 @@ final class ScriptedRegistrar: @unchecked Sendable {
             }
             guard count > 0 else { continue }
             let message = String(decoding: buffer[..<count], as: UTF8.self)
-            handle(message, from: from)
+            let peer = from
+            handle(message) { [self] datagram in send(datagram, to: peer) }
         }
         finished.signal()
     }
 
-    private func handle(_ message: String, from peer: sockaddr_in) {
+    /// TCP: accept a connection, split its byte stream into messages at the blank line (a
+    /// REGISTER has no body), and answer each on the same connection.
+    private func receiveStreamLoop() {
+        var buffer = [UInt8](repeating: 0, count: 65_536)
+        var pending = ""
+        var timeout = timeval(tv_sec: 0, tv_usec: 100_000)
+        while !lock.withLock({ stopped }) {
+            var fd = lock.withLock { connection }
+            if fd < 0 {
+                fd = accept(socket, nil, nil)   // wakes on the listener's receive timeout
+                guard fd >= 0 else { continue }
+                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+                lock.withLock { connection = fd }
+                pending = ""
+            }
+            let count = recv(fd, &buffer, buffer.count, 0)
+            if count == 0 {   // the peer closed it; wait for the next one
+                lock.withLock { _ = close(fd); connection = -1 }
+                continue
+            }
+            guard count > 0 else { continue }
+            pending += String(decoding: buffer[..<count], as: UTF8.self)
+            while let end = pending.range(of: "\r\n\r\n") {
+                let message = String(pending[..<end.upperBound])
+                pending.removeSubrange(..<end.upperBound)
+                let open = fd
+                handle(message) { [self] bytes in write(bytes, on: open) }
+            }
+        }
+        finished.signal()
+    }
+
+    private func handle(_ message: String, reply: @escaping @Sendable ([UInt8]) -> Void) {
         let lines = message.components(separatedBy: "\r\n")
         guard let requestLine = lines.first, requestLine.hasPrefix("REGISTER ") else { return }
         let headers = lines.dropFirst().prefix { !$0.isEmpty }
@@ -159,8 +205,8 @@ final class ScriptedRegistrar: @unchecked Sendable {
             response = (["SIP/2.0 \(code) Rejected"] + echoed).joined(separator: "\r\n")
         }
         let datagram = Array((response + "\r\nContent-Length: 0\r\n\r\n").utf8)
-        DispatchQueue.global().asyncAfter(deadline: .now() + delay.timeInterval) { [self] in
-            send(datagram, to: peer)
+        DispatchQueue.global().asyncAfter(deadline: .now() + delay.timeInterval) {
+            reply(datagram)
         }
     }
 
@@ -174,6 +220,14 @@ final class ScriptedRegistrar: @unchecked Sendable {
                            socklen_t(MemoryLayout<sockaddr_in>.size))
                 }
             }
+        }
+    }
+
+    private func write(_ bytes: [UInt8], on fd: Int32) {
+        lock.withLock {
+            // Not after stop(), and not to a connection that has since been closed.
+            guard !stopped, connection == fd else { return }
+            _ = bytes.withUnsafeBytes { Darwin.send(fd, $0.baseAddress, bytes.count, 0) }
         }
     }
 

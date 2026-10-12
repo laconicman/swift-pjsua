@@ -1,3 +1,5 @@
+import Foundation
+
 /// Everything the engine needs to add a SIP account **except its secret**.
 ///
 /// Secrets are absent by construction, which is what makes this type safe to make `Codable`: an
@@ -55,6 +57,46 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
     /// value.
     public var registrationTimeout: UInt32?
 
+    /// The account's SIP instance ID (RFC 5626 §4.1): the `+sip.instance` parameter of the REGISTER
+    /// `Contact` (`pjsua_acc_config.rfc5626_instance_id`).
+    ///
+    /// Registrars such as Kamailio and Flexisip treat contacts with the same instance ID as one
+    /// device: a new binding from it replaces the old one. So the value must be **unique to the
+    /// device and persistent** across launches. Generate it once, store it, and pass the same value
+    /// every time. A value that changes leaves stale bindings behind; one shared by two devices
+    /// makes them displace each other.
+    ///
+    /// The engine sends it as `<urn:uuid:…>` in lower case. Registrars compare the value
+    /// case-sensitively, and `UUID.uuidString` is upper case.
+    ///
+    /// `nil` keeps pjsua's own behaviour: an ID derived from the host name, sent only while SIP
+    /// outbound is in use (``usesSIPOutbound``, TCP and TLS). On iOS the host name is not the
+    /// device's, so every phone would send the same one.
+    ///
+    /// A configured ID is sent in every REGISTER, with or without SIP outbound. Applied when the
+    /// account is added. ``PJSUA/reRegister(_:updatingPush:wait:)`` keeps it: changing it on a
+    /// registered binding is a Contact change, which leaves the old binding in place on some
+    /// registrars. To change it, remove the account and add it again.
+    public var instanceID: UUID?
+
+    /// Whether the account offers SIP outbound (RFC 5626) on TCP and TLS
+    /// (`pjsua_acc_config.use_rfc5626`). When it does, the REGISTER carries `reg-id` and the `ob`
+    /// Contact parameter, and the request carries `Supported: outbound`. `true` by default, pjsua's
+    /// default.
+    ///
+    /// Turn it off, and set ``instanceID``, for a registrar that does not confirm outbound, as
+    /// Flexisip, OpenSIPS and Kamailio in its default configuration do not. With outbound offered
+    /// and not confirmed, pjsua sends `reg-id` in the first REGISTER and drops it from later ones.
+    /// Kamailio in its default configuration keys bindings on the instance ID and `reg-id`
+    /// together, so the un-REGISTER no longer matches and the binding stays until it expires. An
+    /// instance ID without outbound keeps the Contact the same from the first REGISTER to the
+    /// un-REGISTER. Turning outbound off also means no 439 (First Hop Lacks Outbound Support) can
+    /// occur.
+    ///
+    /// Applied when the account is added. ``PJSUA/reRegister(_:updatingPush:wait:)`` keeps the
+    /// live value.
+    public var usesSIPOutbound: Bool
+
     /// Make this the default account for outbound calls.
     public var isDefault: Bool
 
@@ -65,6 +107,8 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
                 transportName: String? = nil,
                 push: PushConfiguration? = nil,
                 registrationTimeout: UInt32? = nil,
+                instanceID: UUID? = nil,
+                usesSIPOutbound: Bool = true,
                 isDefault: Bool = true) {
         self.id = id
         self.registrar = registrar
@@ -73,6 +117,8 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
         self.transportName = transportName
         self.push = push
         self.registrationTimeout = registrationTimeout
+        self.instanceID = instanceID
+        self.usesSIPOutbound = usesSIPOutbound
         self.isDefault = isDefault
     }
 
@@ -100,6 +146,8 @@ public struct AccountConfiguration: Sendable, Codable, Equatable {
         transportName = try container.decodeIfPresent(String.self, forKey: .transportName)
         push = try container.decodeIfPresent(PushConfiguration.self, forKey: .push)
         registrationTimeout = try container.decodeIfPresent(UInt32.self, forKey: .registrationTimeout)
+        instanceID = try container.decodeIfPresent(UUID.self, forKey: .instanceID)
+        usesSIPOutbound = try container.decodeIfPresent(Bool.self, forKey: .usesSIPOutbound) ?? true
         isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? true
     }
 }

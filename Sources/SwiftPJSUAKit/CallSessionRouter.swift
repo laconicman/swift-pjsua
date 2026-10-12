@@ -282,10 +282,11 @@ public actor CallSessionRouter {
         if epoch == resetEpoch {
             await registry.markReported(uuid: uuid)
             // pjsua refused the INVITE while CallKit was answering: end the call it just accepted,
-            // unless an INVITE has bound it since. Read after the await, which a rejection can run
-            // into; from here on a rejection sees the report resolved and ends the call itself.
+            // unless an INVITE has bound it since, or it has been ended and evicted meanwhile (a
+            // missing entry is not an unbound one). Read after the await, which a rejection can
+            // run into; from here on a rejection sees the report resolved and ends the call itself.
             if rejectedDuringReport.remove(uuid) != nil,
-               await registry.entry(for: uuid)?.call == nil {
+               let entry = await registry.entry(for: uuid), entry.call == nil {
                 provider.reportCall(with: uuid, endedAt: nil, reason: .failed)
                 await evict(uuid: uuid)
             }

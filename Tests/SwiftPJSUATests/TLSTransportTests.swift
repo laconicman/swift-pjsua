@@ -16,11 +16,10 @@ import XCTest
 ///   handshake. pjproject#5216 made that the house rule for all backends. If a PJSIP bump
 ///   ever reverts it, ``testMissingCertificateFailsAtTransportCreate`` goes red here
 ///   instead of in the field.
-/// * **The 8 KB truncation.** `create_data_from_file()` reads a single 8192-byte chunk and
-///   treats it as the whole file, so a larger bundle is silently truncated and then fails
-///   as unparsable. pjproject#5222 fixes that and is *not* in our pinned binary, so
-///   ``testOversizedPKCS12StillFailsToLoad`` is a detector: when it starts failing, the
-///   fix has arrived.
+/// * **The 8 KB truncation.** Through swift-pjsip 0.2.1, `create_data_from_file()` read a
+///   single 8192-byte chunk and treated it as the whole file, so a larger bundle was
+///   silently truncated and then failed as unparsable. pjproject#5222 fixed it, and it is
+///   in the binary since 0.3.0: ``testOversizedPKCS12Loads`` keeps it fixed.
 /// * **TD-19 / TD-22.** Whether a listener restart keeps the credentials the listener was
 ///   created with. That decides whether the recovery path upstream's design assumes —
 ///   "a certificate that becomes loadable late needs an explicit restart" — is usable at
@@ -79,20 +78,20 @@ final class TLSTransportTests: XCTestCase {
 
     // MARK: - The 8 KB ceiling (pjproject#5222)
 
-    /// A valid but oversized (> 8 KB) PKCS#12 fails **today**, because
-    /// `create_data_from_file()` truncates it.
+    /// A valid PKCS#12 larger than 8 KB creates a TLS listener.
     ///
-    /// This is a detector, not a wish: when a `swift-pjsip` rebuild picks up
-    /// pjproject#5222 this test starts failing, and the right response is to flip the
-    /// expectation and delete this comment. Until then, chains must stay under 8 KB.
-    func testOversizedPKCS12StillFailsToLoad() throws {
+    /// Until swift-pjsip 0.3.0 this asserted the opposite, as a detector for
+    /// pjproject#5222: `create_data_from_file()` read one 8192-byte chunk and the import
+    /// failed on the truncated file. A failure here now means the truncation is back.
+    func testOversizedPKCS12Loads() throws {
         let certificate = try TLSFixture.path("oversized")
         try withPJSUA {
             let created = createTLSTransport(certFile: certificate)
-            XCTAssertTrue(created.status.isError,
-                          "an oversized .p12 loaded — pjproject#5222 has landed in our "
-                          + "binary. Flip this expectation and lift the 8 KB ceiling from "
-                          + "swift-pjsip/docs/Apple-TLS-Backends.md.")
+            XCTAssertTrue(created.status.isSuccess,
+                          "a valid .p12 over 8 KB failed to load — the 8 KB truncation "
+                          + "pjproject#5222 removed is back: " + created.status.strError())
+            XCTAssertNotEqual(boundPort(created.id), 0,
+                              "listener reported ready but is not bound to a port")
         }
     }
 
@@ -142,22 +141,22 @@ final class TLSTransportTests: XCTestCase {
         }
     }
 
-    /// Once a credential-carrying restart **fails**, `pjsua_transport_lis_restart()` can
-    /// no longer bring the listener back — and it reports success while not doing so.
+    /// After a credential-carrying restart **fails**, a restart with loadable credentials
+    /// brings the listener back.
     ///
-    /// This matters because "call restart, reschedule on failure" is the recovery recipe
-    /// pjsua itself models in `restart_listener()` (`pjsua_core.c`) and the one TD-22 says
-    /// upstream's fail-fast design assumes. A failed restart leaves `listener->ssock`
-    /// NULL, and every later restart then takes `pjsip_tls_transport_restart2()`'s
-    /// "no listener created, update the published address only" branch: it copies the new
-    /// settings, does **not** reload the certificate, does **not** re-open the socket, and
-    /// returns `PJ_SUCCESS`.
+    /// "Call restart, reschedule on failure" is the recovery recipe pjsua itself models in
+    /// `restart_listener()` (`pjsua_core.c`) and the one upstream's fail-fast design
+    /// (pjproject#5216) assumes. Through swift-pjsip 0.2.1 it did not work: a failed restart
+    /// left `listener->ssock` NULL, and every later restart took
+    /// `pjsip_tls_transport_restart2()`'s "update the published address only" branch and
+    /// returned `PJ_SUCCESS` without re-listening (TD-29). pjproject#5233 made a restart of
+    /// a factory that wanted a listener really restart it; in the binary since 0.3.0.
     ///
     /// The listening port is the evidence. A failed restart leaves the factory's recorded
     /// address at what was *asked* for — port 0, via `update_bound_addr()` — so a restart
     /// that really re-binds reports a real port afterwards, and one that does nothing
     /// still reports 0.
-    func testRestartAfterAFailedRestartReportsSuccessWithoutRecovering() throws {
+    func testRestartAfterAFailedRestartRecovers() throws {
         let certificate = try TLSFixture.path("good")
         try withPJSUA {
             let created = createTLSTransport(certFile: certificate)
@@ -184,12 +183,10 @@ final class TLSTransportTests: XCTestCase {
             let portAfterRecovery = boundPort(created.id)
 
             XCTAssertTrue(recovery.isSuccess,
-                          "expected the no-op branch to report success; it returned "
-                          + "\(recovery.strError())")
-            XCTAssertEqual(portAfterRecovery, 0,
-                           "the listener re-bound on port \(portAfterRecovery), so a restart "
-                           + "does recover from a failed one after all — this trap is gone "
-                           + "and the test can go with it")
+                          "the recovery restart failed: \(recovery.strError())")
+            XCTAssertNotEqual(portAfterRecovery, 0,
+                              "the recovery restart reported success but left no listener "
+                              + "bound — the pre-pjproject#5233 trap (TD-29) is back")
         }
     }
 }
@@ -205,9 +202,8 @@ extension TLSTransportTests {
     /// Keeping a whole scenario inside one test method is what guarantees that — XCTest
     /// makes no promise that `setUp` runs on the test method's thread.
     ///
-    /// Each test gets its own pjsua instance rather than sharing one, because a TLS
-    /// listener that has been deliberately broken stays broken (see
-    /// ``testRestartAfterAFailedRestartReportsSuccessWithoutRecovering``).
+    /// Each test gets its own pjsua instance rather than sharing one, because some tests
+    /// break their listener on purpose (see ``testRestartAfterAFailedRestartRecovers``).
     private func withPJSUA(_ body: () throws -> Void) throws {
         try pjsua_create().throwIfFailed()
         defer { pjsua_destroy() }

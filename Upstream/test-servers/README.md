@@ -34,6 +34,22 @@ Contact. A fix gated on `rfc5626_status` looks right and silently leaves the
 account unregistered here. That is the steady state for any account registered
 to a registrar without outbound support.
 
+With pjsip/pjproject#5281 the refresh drops `reg-id` but still sends
+`Supported: outbound`, and the 439 must still trigger the fallback: gating on
+`rfc5626_status` would leave the account unregistered with no retry.
+
+### `run-scripted.sh` — one registrar, six scenarios
+
+`RegistrarScripted.swift` covers the #5281 paths; its header lists the
+scenarios (`norequire`, `active-then-na`, `failover-439`, `initial-439`,
+`nat-rewrite`, `nat-rewrite-401`). To isolate a change, run the same scenario
+against a baseline build too, labelled `base` so the ports differ, and compare
+the two `out/*.registrar.log` files:
+
+```bash
+./run-scripted.sh active-then-na & ./run-scripted.sh active-then-na $BASE_PJSUA base & wait
+```
+
 ## Running
 
 Needs a built `pjsua` from the `pjproject` checkout next to this repo. Override

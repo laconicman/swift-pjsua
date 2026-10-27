@@ -49,6 +49,16 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
     /// removes the binding instead of keeping it; leave the field `nil` for pjsua's default.
     case zeroRegistrationTimeout
 
+    /// A ``PJSUA/Configuration/codecPriorities`` / `videoCodecPriorities` key matched no codec id
+    /// in the binary (`pjsua_codec_set_priority` → `PJ_ENOTFOUND`). The match is a case-insensitive
+    /// prefix on ids such as `opus/48000/2`; ``PJSUA/audioCodecs()`` lists what the binary offers.
+    /// Thrown from ``PJSUA/start(_:)``, which fails rather than silently offering the wrong codecs.
+    case unknownCodec(String)
+
+    /// ``MediaConfiguration/clockRate`` was zero. pjsua does not substitute its default for 0; it
+    /// would size the conference bridge's frames at zero samples.
+    case zeroClockRate
+
     public var description: String {
         switch self {
         case .unknownAccount(let account):
@@ -69,6 +79,10 @@ public enum PJSUAUsageError: Error, Equatable, CustomStringConvertible {
             "PJSUAUsageError.unknownTransport(\(name))"
         case .zeroRegistrationTimeout:
             "PJSUAUsageError.zeroRegistrationTimeout"
+        case .unknownCodec(let id):
+            "PJSUAUsageError.unknownCodec(\(id))"
+        case .zeroClockRate:
+            "PJSUAUsageError.zeroClockRate"
         }
     }
 }

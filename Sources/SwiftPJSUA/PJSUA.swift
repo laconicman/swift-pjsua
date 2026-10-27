@@ -95,10 +95,29 @@ public actor PJSUA {
         /// Runtime-only: excluded from `Codable` and `==` — closures are neither.
         public var logSink: (@Sendable (_ level: Int32, _ text: String) -> Void)?
         public var userAgent: String = "swift-pjsua"
+        /// Global media defaults (`pjsua_media_config`) — see ``MediaConfiguration``.
+        public var media = MediaConfiguration()
+        /// Audio codec id prefix → priority, e.g. `["opus": 255, "PCMU": 200, "iLBC": 0]`.
+        ///
+        /// `pjsua_codec_set_priority` matches each key as a **case-insensitive prefix** of the
+        /// codec ids ``audioCodecs()`` reports (`opus/48000/2`, `PCMU/8000/1`, …) — `"opus"`,
+        /// `"PCMU"` and `"ilbc"` all match, and `"*"` matches every codec. Every match gets the
+        /// priority: 0 disables (listed, never offered), higher offers earlier. pjsua stores a
+        /// requested 255 as 254 once sorted and only the most recently assigned 255 wins, so the
+        /// keys are applied in **ascending** order — with two keys at 255 the lexicographically
+        /// greatest key ends up first; use distinct priorities to express an order. A key that
+        /// matches nothing fails ``start(_:)`` with ``PJSUAUsageError/unknownCodec(_:)``.
+        public var codecPriorities: [String: UInt8] = [:]
+        /// Video twin of ``codecPriorities`` (`pjsua_vid_codec_set_priority`), e.g.
+        /// `["H264": 255]`. A separate property because pjsua keeps video codecs in their own
+        /// codec manager: `H264` and an audio id do not share a namespace, so one map would
+        /// have been a lie about the match. ``videoCodecs()`` lists the ids.
+        public var videoCodecPriorities: [String: UInt8] = [:]
         public init() {}
 
         private enum CodingKeys: String, CodingKey {
-            case transports, logLevel, logSinkLevel, messageLogging, userAgent
+            case transports, logLevel, logSinkLevel, messageLogging, userAgent, media
+            case codecPriorities, videoCodecPriorities
         }
 
         /// `logSink` itself has no equality to compare, so `==` counts only set-vs-nil:
@@ -108,6 +127,9 @@ public actor PJSUA {
                 && l.logSinkLevel == r.logSinkLevel
                 && l.messageLogging == r.messageLogging
                 && l.userAgent == r.userAgent
+                && l.media == r.media
+                && l.codecPriorities == r.codecPriorities
+                && l.videoCodecPriorities == r.videoCodecPriorities
                 && (l.logSink == nil) == (r.logSink == nil)
         }
 
@@ -126,6 +148,12 @@ public actor PJSUA {
                 ?? true
             userAgent = try container.decodeIfPresent(String.self, forKey: .userAgent)
                 ?? "swift-pjsua"
+            media = try container.decodeIfPresent(MediaConfiguration.self, forKey: .media)
+                ?? MediaConfiguration()
+            codecPriorities = try container.decodeIfPresent([String: UInt8].self,
+                                                            forKey: .codecPriorities) ?? [:]
+            videoCodecPriorities = try container.decodeIfPresent([String: UInt8].self,
+                                                                 forKey: .videoCodecPriorities) ?? [:]
         }
     }
 
@@ -147,6 +175,10 @@ public actor PJSUA {
     /// cause is gone: a port another app holds, for instance.
     public func start(_ config: Configuration = .init()) throws {
         precondition(state == .idle, "PJSUA.start() succeeds once; only a failed start may be retried")
+        // pjsua does not substitute its default for a zero clock rate — it would size the
+        // conference bridge's frames at zero samples. Refuse before pjsua_create; nothing to
+        // clean up yet.
+        guard config.media.clockRate != 0 else { throw PJSUAUsageError.zeroClockRate }
 
         // 1. create — initializes PJLIB; THIS thread becomes the registered main thread.
         try pjsua_create().throwIfFailed()
@@ -223,9 +255,18 @@ public actor PJSUA {
         var media = pjsua_media_config()
         pjsua_media_config_default(&media)
         media.thread_cnt = 1 // media worker thread; keep >= 1 for the same reason as above.
+        media.clock_rate = config.media.clockRate
+        media.snd_clock_rate = config.media.soundDeviceClockRate
 
         do {
             try pjsua_init(&cfg, &log, &media).throwIfFailed()
+
+            // Codec priorities are global to the one codec manager and callable once pjsua_init
+            // has registered the factories; set here so the first offer already carries them.
+            // Audio and video live in separate managers — two maps, two namespaces.
+            try applyCodecPriorities(config.codecPriorities, using: pjsua_codec_set_priority)
+            try applyCodecPriorities(config.videoCodecPriorities,
+                                     using: pjsua_vid_codec_set_priority)
 
             // 3. transport(s) — one per TransportConfiguration, remembered by name so an
             // account can pin one (`AccountConfiguration.transportName` →

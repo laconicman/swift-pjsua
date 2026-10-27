@@ -198,6 +198,10 @@ final class CodecTests: XCTestCase {
         for codec in codecs {
             print("[codecs]   \(codec.id) prio=\(codec.priority) \"\(codec.description)\"")
         }
+        for name in ["h264", "vp8", "vp9"] {
+            XCTAssertTrue(codecs.contains { $0.id.lowercased().hasPrefix(name + "/") },
+                          "no video codec id named \(name) in \(codecs.map(\.id))")
+        }
         await engine.shutdown()
         self.engine = nil
 

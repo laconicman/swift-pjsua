@@ -51,7 +51,8 @@ let package = Package(
         // exactly the releases that cannot change the ABI under us, and adopting a new
         // binary stays a deliberate one-line edit with a diff to review.
         //
-        // Do not lower the floor. 0.4.0 is the first binary with Opus (`opus/48000/2`) and the
+        // Do not lower the floor. 0.5.0 is the first binary with the VP8/VP9 pair
+        // (`VP8/102`, `VP9/105` — libvpx folded in), on top of 0.4.0's Opus and the
         // first built from PJSIP master `1f0ebf2eb`, which carries pjproject#5331 — the
         // `contact_rewritten` ordering fix `PJSUA+RegistrationLifecycle` reasons about. The ABI
         // did not change structurally (one more codec factory). 0.3.0 was the first binary
@@ -63,7 +64,7 @@ let package = Package(
         // overrides, so Swift compiled PJSUA_MAX_ACC 4 against a binary built with 8 (see
         // swift-pjsip ARCHITECTURE.md decision 4) — and 0.1.x is PJSIP 2.16, below the upstream
         // floor this engine relies on for the 439 / RFC 5626 handling.
-        .package(url: "https://github.com/laconicman/swift-pjsip", "0.4.0" ..< "0.5.0")
+        .package(url: "https://github.com/laconicman/swift-pjsip", "0.5.0" ..< "0.6.0")
     ],
     targets: [
         // The pure engine. Also doubles as the "support target" that carries the

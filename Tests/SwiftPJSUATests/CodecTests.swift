@@ -151,6 +151,38 @@ final class CodecTests: XCTestCase {
                              "a disabled codec outranks an enabled one")
     }
 
+    /// Priorities are not start-time-only: pjsua reads the codec manager at every negotiation,
+    /// so a running engine takes a new order for the next offer or answer.
+    func testPrioritiesCanBeChangedAtRuntime() async throws {
+        let engine = PJSUA()
+        self.engine = engine
+        var configuration = PJSUA.Configuration()
+        configuration.transports = [.init("udp", .udp, port: 0)]
+        try await engine.start(configuration)
+
+        try await engine.setCodecPriorities(["PCMU": 255])
+        var codecs = try await engine.audioCodecs()
+        XCTAssertTrue(codecs[0].id.lowercased().hasPrefix("pcmu/"),
+                      "expected PCMU first, got \(codecs.map(\.id))")
+
+        try await engine.setCodecPriorities(["opus": 255, "PCMU": 0])
+        codecs = try await engine.audioCodecs()
+        XCTAssertTrue(codecs[0].id.lowercased().hasPrefix("opus/"),
+                      "expected opus first, got \(codecs.map(\.id))")
+        let pcmu = codecs.first { $0.id.lowercased().hasPrefix("pcmu/") }
+        XCTAssertEqual(pcmu?.priority, 0)
+
+        let before = codecs
+        do {
+            try await engine.setCodecPriorities(["nonesuch": 1])
+            XCTFail("an unmatched codec id succeeded")
+        } catch PJSUAUsageError.unknownCodec("nonesuch") {
+            // expected
+        }
+        codecs = try await engine.audioCodecs()
+        XCTAssertEqual(codecs, before)
+    }
+
     /// `videoCodecs()` must at least enumerate without error — the list can legitimately be
     /// empty if the binary registers no video codecs — and an unmatched key against the video
     /// namespace fails the start the same way an audio one does.

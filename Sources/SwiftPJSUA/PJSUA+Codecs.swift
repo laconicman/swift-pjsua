@@ -11,6 +11,15 @@ extension PJSUA {
         return try enumCodecs(using: pjsua_enum_codecs)
     }
 
+    /// Video twin of ``audioCodecs()`` — the video codecs the binary offers, in SDP offer order.
+    /// pjsua keeps video codecs in their own codec manager, a separate namespace from the audio
+    /// ids (`H264` and `opus/48000/2` never collide). Valid once ``start(_:)`` has completed.
+    /// Wraps `pjsua_vid_enum_codecs`.
+    public func videoCodecs() throws -> [CodecInfo] {
+        precondition(state == .running, "start() must complete before videoCodecs()")
+        return try enumCodecs(using: pjsua_vid_enum_codecs)
+    }
+
     /// Runs one of pjsua's codec enumerators over a fixed array and copies the strings out.
     ///
     /// pjsua caps the enumeration at 32 entries, and each returned `pjsua_codec_info`'s

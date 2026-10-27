@@ -19,11 +19,13 @@ final class CodecTests: XCTestCase {
         XCTAssertEqual(decoded.media.clockRate, 16000)
         XCTAssertEqual(decoded.media.soundDeviceClockRate, 0)
         XCTAssertTrue(decoded.codecPriorities.isEmpty)
+        XCTAssertTrue(decoded.videoCodecPriorities.isEmpty)
 
         var configuration = PJSUA.Configuration()
         configuration.media.clockRate = 48000
         configuration.media.soundDeviceClockRate = 48000
         configuration.codecPriorities = ["opus": 255, "PCMU": 0]
+        configuration.videoCodecPriorities = ["H264": 1]
         let roundTrip = try JSONDecoder().decode(
             PJSUA.Configuration.self, from: JSONEncoder().encode(configuration))
         XCTAssertEqual(roundTrip, configuration)
@@ -40,6 +42,10 @@ final class CodecTests: XCTestCase {
         var priorities = PJSUA.Configuration()
         priorities.codecPriorities = ["opus": 255]
         XCTAssertNotEqual(priorities, PJSUA.Configuration())
+
+        var videoPriorities = PJSUA.Configuration()
+        videoPriorities.videoCodecPriorities = ["H264": 255]
+        XCTAssertNotEqual(videoPriorities, PJSUA.Configuration())
     }
 
     /// pjsua does not substitute its default for a zero clock rate — start refuses it, and
@@ -143,5 +149,36 @@ final class CodecTests: XCTestCase {
         let lastEnabled = codecs.lastIndex { $0.priority > 0 }
         XCTAssertGreaterThan(ilbc, lastEnabled ?? -1,
                              "a disabled codec outranks an enabled one")
+    }
+
+    /// `videoCodecs()` must at least enumerate without error — the list can legitimately be
+    /// empty if the binary registers no video codecs — and an unmatched key against the video
+    /// namespace fails the start the same way an audio one does.
+    func testVideoCodecsEnumerateAndUnknownVideoIdFailsStart() async throws {
+        let engine = PJSUA()
+        self.engine = engine
+        var configuration = PJSUA.Configuration()
+        configuration.transports = [.init("udp", .udp, port: 0)]
+        try await engine.start(configuration)
+
+        let codecs = try await engine.videoCodecs()
+        print("[codecs] video, default priorities:")
+        for codec in codecs {
+            print("[codecs]   \(codec.id) prio=\(codec.priority) \"\(codec.description)\"")
+        }
+        await engine.shutdown()
+        self.engine = nil
+
+        let second = PJSUA()
+        self.engine = second
+        var bad = PJSUA.Configuration()
+        bad.transports = [.init("udp", .udp, port: 0)]
+        bad.videoCodecPriorities = ["nonesuch": 1]
+        do {
+            try await second.start(bad)
+            XCTFail("a start with an unmatched video codec id succeeded")
+        } catch PJSUAUsageError.unknownCodec("nonesuch") {
+            // expected
+        }
     }
 }

@@ -108,11 +108,16 @@ public actor PJSUA {
         /// greatest key ends up first; use distinct priorities to express an order. A key that
         /// matches nothing fails ``start(_:)`` with ``PJSUAUsageError/unknownCodec(_:)``.
         public var codecPriorities: [String: UInt8] = [:]
+        /// Video twin of ``codecPriorities`` (`pjsua_vid_codec_set_priority`), e.g.
+        /// `["H264": 255]`. A separate property because pjsua keeps video codecs in their own
+        /// codec manager: `H264` and an audio id do not share a namespace, so one map would
+        /// have been a lie about the match. ``videoCodecs()`` lists the ids.
+        public var videoCodecPriorities: [String: UInt8] = [:]
         public init() {}
 
         private enum CodingKeys: String, CodingKey {
             case transports, logLevel, logSinkLevel, messageLogging, userAgent, media
-            case codecPriorities
+            case codecPriorities, videoCodecPriorities
         }
 
         /// `logSink` itself has no equality to compare, so `==` counts only set-vs-nil:
@@ -124,6 +129,7 @@ public actor PJSUA {
                 && l.userAgent == r.userAgent
                 && l.media == r.media
                 && l.codecPriorities == r.codecPriorities
+                && l.videoCodecPriorities == r.videoCodecPriorities
                 && (l.logSink == nil) == (r.logSink == nil)
         }
 
@@ -146,6 +152,8 @@ public actor PJSUA {
                 ?? MediaConfiguration()
             codecPriorities = try container.decodeIfPresent([String: UInt8].self,
                                                             forKey: .codecPriorities) ?? [:]
+            videoCodecPriorities = try container.decodeIfPresent([String: UInt8].self,
+                                                                 forKey: .videoCodecPriorities) ?? [:]
         }
     }
 
@@ -255,7 +263,10 @@ public actor PJSUA {
 
             // Codec priorities are global to the one codec manager and callable once pjsua_init
             // has registered the factories; set here so the first offer already carries them.
+            // Audio and video live in separate managers — two maps, two namespaces.
             try applyCodecPriorities(config.codecPriorities, using: pjsua_codec_set_priority)
+            try applyCodecPriorities(config.videoCodecPriorities,
+                                     using: pjsua_vid_codec_set_priority)
 
             // 3. transport(s) — one per TransportConfiguration, remembered by name so an
             // account can pin one (`AccountConfiguration.transportName` →

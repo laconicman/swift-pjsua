@@ -5,8 +5,8 @@ in flight; §5 lists what may still move. Post-implementation review is planned 
 deep-consult rule.
 
 Consolidates the config-shaped debt — **TD-16** (no outbound-proxy surface), **TD-18** (transport
-port model), **TD-14** (STUN/ICE/DNS unexposed), codec priority, and the credential half of
-**TD-11** — into one vocabulary, so those features become *field additions* rather than repeated
+port model), **TD-14** (STUN/ICE/DNS unexposed), codec priority (D-CONFIG-7, shipped), and the
+credential half of **TD-11** — into one vocabulary, so those features become *field additions* rather than repeated
 signature churn.
 
 ## 1. The problem
@@ -51,6 +51,12 @@ public struct TransportConfiguration: Sendable, Codable, Equatable {
 
 /// → `pjsua_media_config`: the **global media defaults** accounts inherit.
 public struct MediaConfiguration: Sendable, Codable, Equatable {
+    /// Conference-bridge clock rate (and the null sound device's) → `clock_rate`. pjsua's
+    /// 16000 by default; Opus is fixed at 48 kHz, so a consumer preferring it sets 48000.
+    /// 0 is refused (`zeroClockRate`): pjsua does not substitute its default for it.
+    public var clockRate: UInt32 = 16000
+    /// Real sound device's rate → `snd_clock_rate`; 0 = follow `clockRate` (pjsua's convention).
+    public var soundDeviceClockRate: UInt32 = 0
     public var isICEEnabled: Bool = false          // ⏳ TD-14
     public var turnServer: String?                 // ⏳ TD-14
 }
@@ -65,10 +71,14 @@ extension PJSUA {
         public var stunServers: [String] = []      // ⏳ → pjsua_config.stun_srv[]
         public var nameservers: [String] = []      // ⏳ → pjsua_config.nameserver[]
         public var media = MediaConfiguration()    // → pjsua_media_config
-        /// Codec id → priority (0 disables … 255 highest), e.g. ["PCMU/8000": 128].
-        /// **Global in pjsua1**, applied after `pjsua_init` — never per-account. ⏳
+        /// Codec id *prefix* → priority (0 disables … 255 highest), e.g. ["opus": 255].
+        /// **Global in pjsua1**, applied after `pjsua_init` — never per-account. D-CONFIG-7.
         public var codecPriorities: [String: UInt8] = [:]
+        /// Video twin → `pjsua_vid_codec_set_priority`; its own namespace. D-CONFIG-7.
+        public var videoCodecPriorities: [String: UInt8] = [:]
     }
+    public func audioCodecs() throws -> [CodecInfo]   // pjsua_enum_codecs, offer order
+    public func videoCodecs() throws -> [CodecInfo]   // pjsua_vid_enum_codecs
 }
 
 public struct AccountConfiguration: Sendable, Codable, Equatable {
@@ -307,6 +317,47 @@ is precisely what leaves a stale binding. Remove and re-add instead.
   makes the 439 retry path unreachable: it requires `use_rfc5626` and an outbound offer actually
   sent (`:3108-3110`, `:3331-3332`). `pjsua_acc_modify` treats both fields as unchanged when
   handed the live values (`:1815`).
+
+**D-CONFIG-7 — codec choice is the consumer's, expressed in pjsua's own vocabulary.** *Added
+2026-10-27 with swift-pjsip 0.4.0 (Opus).* The binary registers Opus at the same
+`PJMEDIA_CODEC_PRIO_NORMAL` as every codec, in factory order after iLBC and G.711, and the codec
+manager keeps registration order at equal priority — so until the engine could set priorities,
+"Opus support" was a fact about the archive, not about a call (the Flexisip loopback negotiated
+iLBC). `codecPriorities` hands `pjsua_codec_set_priority` the consumer's order right after
+`pjsua_init`, before the transports exist, so the first offer already carries it.
+
+- **Keys are pjsua's ids, matched as pjsua matches them** — a case-insensitive prefix
+  (`pj_strnicmp2`) on `encoding/clockRate/channels`: `"opus"` hits `opus/48000/2`, `"PCMU"`
+  hits `PCMU/8000/1`, `"L16"` would hit every L16 variant, `"*"` everything. The engine passes
+  the string through and re-implements nothing; `audioCodecs()` is how a consumer learns the ids
+  without reading our docs. A key that matches nothing returns `PJ_ENOTFOUND`, which `start()`
+  turns into `PJSUAUsageError.unknownCodec(id)` and fails — the alternative was offering the
+  wrong codec set quietly.
+- **Deterministic application: ascending key order.** pjsua re-sorts after every call and
+  demotes any codec stored at 255 to 254, so only the most recently assigned 255 holds the top
+  slot. Applying a dictionary in iteration order would make the SDP depend on hashing; sorted
+  keys make two configurations that differ only in dictionary order produce the same offer. The
+  consequence is documented on the field: with two keys at 255 the lexicographically greatest
+  wins, so distinct priorities are the way to express an order.
+- **Two maps, not one.** pjsua keeps video codecs in their own manager with their own
+  `set_priority`/`enum`; `"H264"` and an audio id never share a namespace, so one map would have
+  lied about the match.
+- **Clock rate is a `MediaConfiguration` field, default unchanged.** `clock_rate` is the bridge
+  rate and the rate the null sound device runs at (`pjsua_aud.c`, `pjmedia_null_port_create`
+  with `media_cfg.clock_rate`); `snd_clock_rate` only enters a real device open and pjsua
+  normalises its 0 to `clock_rate`. It does *not* normalise `clock_rate == 0` — the header's
+  "zero means default" is stale — so the engine refuses 0 before `pjsua_create`. The default
+  stays pjsua's 16000: moving every consumer to 48 kHz is a behaviour change that belongs to a
+  measured decision; the Opus test sets it explicitly.
+- **Not in this round:** `pjmedia_codec_opus_set_config` (bitrate, complexity, CBR) — a knob
+  for when a consumer needs it; and priorities survive `pjsua_handle_ip_change` and account
+  re-registration (plain fields in the codec manager until `pjsua_destroy`), so no re-apply path
+  is needed.
+
+Checked against pjproject at `1f0ebf2eb`: `pjmedia_codec_mgr_set_codec_priority`
+(`codec.c`, prefix match, `PJ_ENOTFOUND`, `sort_codecs` demoting 255), `pjsua_enum_codecs`
+copying the sorted table, `pjmedia_endpt_create_audio_sdp` skipping priority 0, and the
+null-device/clock-rate paths in `pjsua_aud.c` / `pjsua_media.c`.
 
 ## 7. Sequencing
 

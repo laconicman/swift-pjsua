@@ -113,9 +113,9 @@ This package is being built iteratively against a roadmap (M1 → M4).
   surfaced on events; real `on_reg_state2` parsing.
 - `thread_cnt` pinned ≥ 1 (see invariants below); RFC 8599 push params (caller-controlled).
 - Codec selection: `Configuration.codecPriorities` / `videoCodecPriorities` (pjsua's prefix
-  match, applied at `start`; an id the binary lacks fails the start), `audioCodecs()` /
-  `videoCodecs()` in offer order, and `MediaConfiguration.clockRate` for a 48 kHz bridge
-  under Opus.
+  match, applied at `start`; an id the binary lacks fails the start), `setCodecPriorities(_:)`
+  for a running engine, `audioCodecs()` / `videoCodecs()` in offer order, and
+  `MediaConfiguration.clockRate` for a 48 kHz bridge under Opus.
 - Deterministic UUIDv5 dedup logic (`CallIdentity`, unit-tested with the RFC 4122 vector).
 
 **Skeleton (filled in next iterations), marked `Skeleton` in source:**

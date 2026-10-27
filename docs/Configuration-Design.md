@@ -79,6 +79,8 @@ extension PJSUA {
     }
     public func audioCodecs() throws -> [CodecInfo]   // pjsua_enum_codecs, offer order
     public func videoCodecs() throws -> [CodecInfo]   // pjsua_vid_enum_codecs
+    public func setCodecPriorities(_: [String: UInt8]) throws       // same keys, from the next offer on
+    public func setVideoCodecPriorities(_: [String: UInt8]) throws
 }
 
 public struct AccountConfiguration: Sendable, Codable, Equatable {
@@ -349,6 +351,12 @@ iLBC). `codecPriorities` hands `pjsua_codec_set_priority` the consumer's order r
   "zero means default" is stale — so the engine refuses 0 before `pjsua_create`. The default
   stays pjsua's 16000: moving every consumer to 48 kHz is a behaviour change that belongs to a
   measured decision; the Opus test sets it explicitly.
+- **Settable on a running engine too.** `setCodecPriorities(_:)` / `setVideoCodecPriorities(_:)`
+  apply the same keys through the same path; pjsua reads the table at each negotiation, so a
+  change holds from the next offer or answer on and calls in progress keep their codec until
+  they renegotiate. A settings screen needs this, and so does a test that switches codecs
+  between two calls on one engine — which is how the Offhook loopback proves the choice is
+  ours (Opus at 48 kHz, then PCMU, through Flexisip's media relay unmodified).
 - **Not in this round:** `pjmedia_codec_opus_set_config` (bitrate, complexity, CBR) — a knob
   for when a consumer needs it; and priorities survive `pjsua_handle_ip_change` and account
   re-registration (plain fields in the codec manager until `pjsua_destroy`), so no re-apply path

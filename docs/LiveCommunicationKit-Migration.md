@@ -30,7 +30,7 @@
 | `reportNewIncomingCall(with:update:)` | `reportNewIncomingConversation(uuid:update:)` (async throws) | Same dedup role for ``CallIdentity``/``CallRegistry``. A class-level `reportNewIncomingVoIPPushPayload(_:)` exists for reporting from a notification service extension (*verify* the launch/entitlement rules before relying on it). |
 | `reportOutgoingCall(startedConnectingAt:)` / `(connectedAt:)` / `reportCall(endedAt:reason:)` | `reportConversationEvent(.conversationStartedConnecting(Date) / .conversationConnected(Date) / .conversationEnded(Date, EndedReason) / .conversationUpdated(Update), for:)` | One event API for both directions. `EndedReason`: `declinedElsewhere`, `failed`, `joinedElsewhere`, `remoteEnded`, `unanswered` — the same set as `CXCallEndedReason` (`joinedElsewhere` ≙ `answeredElsewhere`), so `endedReason(_:)` ports 1:1. |
 | `CXStartCallAction` | `StartConversationAction(conversationUUID:handles:isVideo:)` | `isVideo` survives — the one system control that expresses "send video". |
-| `CXAnswerCallAction` | `JoinConversationAction`; fulfilled with `fulfill(dateConnected:)` | No video flag on join (same as CallKit) — camera on an incoming call remains the app's decision (``CallMediaIntent``). |
+| `CXAnswerCallAction` | `JoinConversationAction`; fulfilled with `fulfill(dateConnected:)` | No video flag on join (same as CallKit) — video transmission on an incoming call remains the app's decision (``CallMediaIntent``). |
 | `CXEndCallAction` | `EndConversationAction` | |
 | `CXSetHeldCallAction` | `PauseConversationAction(isPaused:)` | "Stops or restarts all audio and video streams"; the system offers it only when `.pausing` is declared (long-press on Mute). Maps to ``PJSUA/setHold(_:)`` / ``PJSUA/resume(_:)`` and is still fulfilled on the `.callMediaState` transition. |
 | `CXSetMutedCallAction` | `MuteConversationAction(isMuted:)` | Maps to ``PJSUA/setMute(_:muted:)``; the engine keeps the mute across pause/resume. |
@@ -45,7 +45,7 @@
 - **State machine is explicit:** `idle → joining → joined → paused ↔ joined → leaving → left`.
   The app drives transitions through events; Apple's rule is "no audio or video capture before
   `joined`". That is the rule the Kit already follows for audio (device opens on `didActivate`),
-  and the one ``CallMediaIntent`` follows for video (camera only on explicit intent, re-applied
+  and the one ``CallMediaIntent`` follows for video (transmission only on explicit intent, re-applied
   after each media rebuild) — the engine side needs no change.
 - **Actions carry a `timeoutDate` and a `state`,** and the delegate is told when one
   `timedOutPerforming`. Today's `pending` table (answer/start fulfilled on `.confirmed`, hold on
@@ -68,7 +68,7 @@
 ## 4. Things to verify on a device before switching
 
 1. Does a conversation whose capabilities include `.video` force an unlock before join, the way
-   `CXCallUpdate.hasVideo = true` does for CallKit? The Kit's camera story relies on the app being
+   `CXCallUpdate.hasVideo = true` does for CallKit? The Kit's video-transmission story relies on the app being
    foreground when the user decides to send video.
 2. Is a `MuteConversationAction` re-delivered after pause/resume, or is the app expected to
    restore mute itself (the engine already does, so either answer is safe — but the UI state must
@@ -82,7 +82,7 @@
 ## 5. What does not change
 
 The engine (`SwiftPJSUA`) and the media intent model. Both frameworks make mute and hold system
-actions and leave the camera to the app; neither carries a video flag on answer/join. That is why
+actions and leave video transmission to the app; neither carries a video flag on answer/join. That is why
 ``CallMediaIntent`` lives in the engine and not in the Kit: a `ConversationController` replacing
 ``CallKitController`` is a mapping exercise over the table in §2, with ``CallSessionRouter``'s
 correlation logic (registry, pending actions, dedup of push vs INVITE) kept intact.

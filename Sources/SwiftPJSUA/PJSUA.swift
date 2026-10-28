@@ -340,25 +340,35 @@ public actor PJSUA {
     /// `call_set_tx_video` (pjsua_vid.c) sets capture up itself when the rebuild released
     /// it (`cap_win_id == PJSUA_INVALID_ID`) and resumes the stream's encoding leg.
     ///
-    /// A failure reaches the app as `.videoTransmissionFailed` on the guaranteed channel —
-    /// the capture device unavailable (permission, locked/backgrounded, busy), or encoder start; the app
-    /// reacts (e.g. shows "video unavailable", or retries with ``setVideoTransmission(_:_:streamIndex:)``).
+    /// Call-wide like ``setVideoTransmission(_:enabled:)`` — every negotiated video
+    /// stream with an encoding direction gets START_TRANSMIT. A failure reaches the app
+    /// as `.videoTransmissionFailed` on the guaranteed channel, once per failing stream —
+    /// the capture device unavailable (permission, locked/backgrounded, busy), or encoder
+    /// start; the app reacts (e.g. shows "video unavailable", or retries with
+    /// ``setVideoTransmission(_:enabled:)``).
     private func reapplyVideoTransmission(_ call: CallID) {
         guard SwiftPJSUA.mediaIntent(for: call.raw).transmitsVideo else { return }
+        var info = pjsua_call_info()
+        guard pjsua_call_get_info(call.raw, &info).isSuccess else { return }
+        let media = callMediaInfos(from: &info)
         // The signal may have been queued before a local hold arrived: the audio
         // stream's `.localHold` status is the same proxy the callback uses for
         // pjsua's `!call->local_hold` guard — never restart transmission while held.
-        var info = pjsua_call_info()
-        if pjsua_call_get_info(call.raw, &info).isSuccess,
-           callMediaInfos(from: &info)
-               .contains(where: { $0.kind == .audio && $0.status == .localHold }) {
+        if media.contains(where: { $0.kind == .audio && $0.status == .localHold }) {
             return
         }
-        var param = pjsua_call_vid_strm_op_param()
-        pjsua_call_vid_strm_op_param_default(&param)
-        let status = pjsua_call_set_vid_strm(call.raw, PJSUA_CALL_VID_STRM_START_TRANSMIT, &param)
-        if !status.isSuccess {
-            emitCallEvent(.videoTransmissionFailed(call: call, status: Int32(status)))
+        for stream in media
+        where stream.kind == .video
+            && (stream.status == .active || stream.status == .localHold)
+            && (stream.direction == .encoding || stream.direction == .encodingDecoding) {
+            var param = pjsua_call_vid_strm_op_param()
+            pjsua_call_vid_strm_op_param_default(&param)
+            param.med_idx = Int32(stream.index)
+            let status = pjsua_call_set_vid_strm(call.raw,
+                                               PJSUA_CALL_VID_STRM_START_TRANSMIT, &param)
+            if !status.isSuccess {
+                emitCallEvent(.videoTransmissionFailed(call: call, status: Int32(status)))
+            }
         }
     }
 

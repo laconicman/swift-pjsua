@@ -254,10 +254,19 @@ public actor CallSessionRouter {
         let uuid = CallIdentity.uuid(serverProvided: serverUUID, sipCallID: sipCallID)
         if let call { uuidByCall[call] = uuid }
 
+        // Read the recorded video flag before the merge so a push-first report (push
+        // knew nothing, `hasVideo: false`) upgraded by this INVITE's SDP can be pushed to
+        // CallKit's UI below.
+        let knewVideo = await registry.entry(for: uuid)?.hasVideo ?? false
         let isNew = await registry.firstSeen(uuid: uuid, sipCallID: sipCallID, call: call,
                                              hasVideo: hasVideo)
         guard isNew else {
             Self.logger.notice("call \(uuid, privacy: .public) already reported to CallKit")
+            if hasVideo, !knewVideo {
+                let update = CXCallUpdate()
+                update.hasVideo = true
+                provider.reportCall(with: uuid, updated: update)
+            }
             return uuid
         }
 

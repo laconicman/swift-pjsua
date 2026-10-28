@@ -87,7 +87,12 @@ extension PJSUA {
     /// `vid_out_auto_transmit` that would resume it is deliberately kept `PJ_FALSE` and
     /// not exposed — see ``CallMediaIntent``). Enabling transmission once survives the
     /// whole call; failure to resume is reported as `.videoTransmissionFailed`.
-    public func setVideoTransmission(_ call: CallID, enabled: Bool, streamIndex: Int32 = -1) throws {
+    ///
+    /// Call-wide: applied to EVERY negotiated video stream with an encoding direction.
+    /// Per-stream control is not a use case the engine models — one video line per call
+    /// today (``addVideoStream(to:captureDevice:)`` re-enables a disabled line rather
+    /// than appending).
+    public func setVideoTransmission(_ call: CallID, enabled: Bool) throws {
         updateMediaIntent(for: call.raw) { $0.transmitsVideo = enabled }
         var info = pjsua_call_info()
         guard pjsua_call_get_info(call.raw, &info).isSuccess else { return }
@@ -96,16 +101,14 @@ extension PJSUA {
         // with `!call->local_hold` (`pjsua_vid_channel_update`, not exposed on
         // `pjsua_call_info`): while held this records only — the resume rebuild re-applies.
         if media.contains(where: { $0.kind == .audio && $0.status == .localHold }) { return }
-        let hasEncodingVideo = media.contains {
-            $0.kind == .video
-                && (streamIndex < 0 || $0.index == Int(streamIndex))
-                && ($0.direction == .encoding || $0.direction == .encodingDecoding)
-        }
-        guard hasEncodingVideo else { return } // applied when the stream next rebuilds
-        try setVideoStream(call,
-                           enabled ? PJSUA_CALL_VID_STRM_START_TRANSMIT
-                                   : PJSUA_CALL_VID_STRM_STOP_TRANSMIT) {
-            $0.med_idx = streamIndex
+        for stream in media
+        where stream.kind == .video
+            && (stream.direction == .encoding || stream.direction == .encodingDecoding) {
+            try setVideoStream(call,
+                               enabled ? PJSUA_CALL_VID_STRM_START_TRANSMIT
+                                       : PJSUA_CALL_VID_STRM_STOP_TRANSMIT) {
+                $0.med_idx = Int32(stream.index)
+            }
         }
     }
 
@@ -132,12 +135,13 @@ extension PJSUA {
         case .unknown(let raw):
             preconditionFailure("setVideoDirection: cannot signal an unknown direction (\(raw))")
         }
-        if direction != .none {
-            updateMediaIntent(for: call.raw) { $0.acceptsVideo = true }
-        }
         try setVideoStream(call, PJSUA_CALL_VID_STRM_CHANGE_DIR) {
             $0.med_idx = streamIndex
             $0.dir = dir
+        }
+        // Offering video — recorded only once the offer was signalled.
+        if direction != .none {
+            updateMediaIntent(for: call.raw) { $0.acceptsVideo = true }
         }
     }
 

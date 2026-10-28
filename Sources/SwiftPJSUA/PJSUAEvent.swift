@@ -84,7 +84,7 @@ public enum PJSUAEvent: Sendable {
     /// locked or backgrounded, busy) or an encoder-start failure. The call itself is
     /// unaffected. The app decides the
     /// reaction — e.g. surface "video unavailable", or retry with
-    /// ``PJSUA/setVideoTransmission(_:_:streamIndex:)`` once the obstruction is gone.
+    /// ``PJSUA/setVideoTransmission(_:enabled:)`` once the obstruction is gone.
     case videoTransmissionFailed(call: CallID, status: Int32)
 }
 

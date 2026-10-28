@@ -57,8 +57,10 @@ public actor CallRegistry {
         self.now = now
     }
 
-    /// Record the call for `uuid`, merging any newly-learned identifiers. `hasVideo` is
-    /// recorded only on first sight — the reporter that arrived first owns the truth.
+    /// Record the call for `uuid`, merging any newly-learned identifiers. `hasVideo`
+    /// OR-merges on later sightings — a VoIP push that arrived without SDP knowledge
+    /// records `false`, and the INVITE that arrives later with video knowledge upgrades
+    /// it; a report that does not know never downgrades one that did.
     ///
     /// - Returns: `true` the first time a `uuid` is seen (the caller should report a new
     ///   incoming call to CallKit); `false` on subsequent arrivals (already reported).
@@ -68,6 +70,7 @@ public actor CallRegistry {
         if var existing = entries[uuid] {
             if existing.sipCallID == nil { existing.sipCallID = sipCallID }
             if existing.call == nil { existing.call = call }
+            if hasVideo { existing.hasVideo = true }
             entries[uuid] = existing
             return false
         }

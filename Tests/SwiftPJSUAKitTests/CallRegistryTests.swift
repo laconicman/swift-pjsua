@@ -23,6 +23,23 @@ final class CallRegistryTests: XCTestCase {
         XCTAssertEqual(entry?.sipCallID, "a@host")
     }
 
+    func testHasVideoMergesUpButNeverDown() async {
+        let registry = CallRegistry()
+        // Push-first: no SDP knowledge (false), then the INVITE knows video (true)...
+        let a = UUID()
+        _ = await registry.firstSeen(uuid: a, hasVideo: false)
+        _ = await registry.firstSeen(uuid: a, hasVideo: true)
+        var entry = await registry.entry(for: a)
+        XCTAssertEqual(entry?.hasVideo, true)
+        // ...and the reverse order stays true — a report that doesn't know never
+        // downgrades one that did.
+        let b = UUID()
+        _ = await registry.firstSeen(uuid: b, hasVideo: true)
+        _ = await registry.firstSeen(uuid: b, hasVideo: false)
+        entry = await registry.entry(for: b)
+        XCTAssertEqual(entry?.hasVideo, true)
+    }
+
     func testRemoveClearsEntry() async {
         let registry = CallRegistry()
         let uuid = UUID()

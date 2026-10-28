@@ -320,7 +320,7 @@ extension PJSUA {
         acc.vid_in_auto_show = true.pjBool
         // `vid_out_auto_transmit` is deliberately left PJ_FALSE (the pjsua default) and
         // not exposed: the standing "send my video" decision is CallMediaIntent's
-        // cameraEnabled, re-applied after every media rebuild — a one-shot auto flag
+        // transmitsVideo, re-applied after every media rebuild — a one-shot auto flag
         // cannot express that (see CallMediaIntent.swift, TD-33).
 
         let idOwner = PJString(config.id)

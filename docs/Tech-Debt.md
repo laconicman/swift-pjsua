@@ -493,9 +493,9 @@ Two per-account pjsua flags the engine sets but does not expose:
 **Why the intent model supersedes them.** Both flags answer "should video go out/in" at
 negotiate time, once. `CallMediaIntent` (#38) answers it as a standing per-call user
 choice, re-applied synchronously after every stream rebuild — which is what actually
-keeps the camera off (default) or on (intent) across hold/unhold/re-INVITE, and what
+keeps video transmission off (default) or on (intent) across hold/unhold/re-INVITE, and what
 fixed the muted-call-comes-back-live bug. `vid_out_auto_transmit` additionally cannot
-express "camera on for *this* call only" — it is per-account, not per-call.
+express "video transmitted for *this* call only" — it is per-account, not per-call.
 
 **What real-world usage would justify exposing them:** none found. The industry shape is
 liblinphone's `VideoActivationPolicy {automaticallyInitiate, automaticallyAccept,

@@ -31,7 +31,7 @@ extension PJSUA {
     /// Answer an incoming call (default `PJSIP_SC_OK` / 200). `acceptVideo` decides the
     /// offered video m-line: `false` answers it with port 0 (`opt.vid_cnt = 0` in
     /// `pjsua_call_answer2`) — an audio-only answer, not a rejection; `true` accepts it
-    /// receive-only until the camera is enabled (``setCameraEnabled(_:_:streamIndex:)``).
+    /// receive-only until transmission is enabled (``setVideoTransmission(_:_:streamIndex:)``).
     /// A non-nil value is also recorded as ``CallMediaIntent/acceptsVideo`` for later
     /// remote re-offers; `nil` (the default) keeps the recorded intent — so a
     /// ``setAcceptsVideo(_:_:)`` issued while the call rang still applies.

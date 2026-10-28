@@ -14,16 +14,26 @@ extension PJSUA {
     // (pjsua_vid.c) starts the rebuilt stream then pauses it in the encoding direction;
     // capture is set up only `if (!call->local_hold && acc->cfg.vid_out_auto_transmit)`.
     // The engine keeps `vid_out_auto_transmit` at its `PJ_FALSE` default and does not
-    // expose it — pjsua's flag answers "when should the camera turn on" once, at
-    // negotiate time, while ``CallMediaIntent/cameraEnabled`` answers it as a standing
+    // expose it — pjsua's flag answers "when should video transmit" once, at
+    // negotiate time, while ``CallMediaIntent/transmitsVideo`` answers it as a standing
     // user choice the engine re-applies after every rebuild (every direction change
     // makes `is_media_changed()` in pjsua_media.c tear down and rebuild the stream:
-    // hold, unhold, remote hold, codec or IP-change re-INVITE). So the camera API here
-    // is intent-based (`setCameraEnabled`), not one-shot.
+    // hold, unhold, remote hold, codec or IP-change re-INVITE). So the transmission API here
+    // is intent-based (`setVideoTransmission`), not one-shot.
     //
     // The engine shapes the full video *surface* (D-VIDEO sign-off); actual pixel rendering
     // (MetalKit / `UIView`) is the Offhook app's job. The package already links CoreVideo /
     // VideoToolbox / MetalKit for that consumer.
+    //
+    // **Threading:** `darwin_stream_stop` (pjmedia-videodev/darwin_dev.m) does
+    // `performSelectorOnMainThread:… waitUntilDone:YES` for `stopRunning`/`finish_render`;
+    // it is reached by STOP_TRANSMIT, hangup and every hold/re-INVITE stream rebuild. The
+    // engine's architecture is the structural fix — every pjsua call runs on the pinned
+    // engine thread and `await` on the actor suspends without blocking the main run loop.
+    // The one way to recreate the deadlock (upstream pjproject issue #4928, closed as
+    // "don't block main") is a *blocking* wait on the main thread for the engine:
+    // `DispatchSemaphore`, `Thread.sleep`, `DispatchQueue.main.sync` from a callback —
+    // apps must never do that; the Kit never does (CallKit delegate → `Task { await … }`).
     //
     // References:
     // - pjsua1 `pjsua_call_set_vid_strm` / `pjsua_call_vid_strm_op` / `..._op_param` (pjsua.h).
@@ -65,8 +75,8 @@ extension PJSUA {
         try setVideoStream(call, PJSUA_CALL_VID_STRM_REMOVE) { $0.med_idx = streamIndex }
     }
 
-    /// Turn the local camera on or off for this call — the "send my video" switch
-    /// (local-only; no re-INVITE). Recorded as ``CallMediaIntent/cameraEnabled`` first,
+    /// Turn local video transmission on or off for this call — the "send my video" switch
+    /// (local-only; no re-INVITE). Recorded as ``CallMediaIntent/transmitsVideo`` first,
     /// then applied as `PJSUA_CALL_VID_STRM_START/STOP_TRANSMIT` (`call_set_tx_video`,
     /// pjsua_vid.c — it sets capture up itself when the stream has none) when the call
     /// currently has a video stream with an encoding direction; otherwise only recorded.
@@ -75,10 +85,10 @@ extension PJSUA {
     /// stream comes back from hold/unhold/re-INVITE with capture released and the
     /// encoder paused (`pjsua_vid_channel_update`; the account flag
     /// `vid_out_auto_transmit` that would resume it is deliberately kept `PJ_FALSE` and
-    /// not exposed — see ``CallMediaIntent``). Enabling the camera once survives the
-    /// whole call; failure to resume is reported as `.cameraStartFailed`.
-    public func setCameraEnabled(_ call: CallID, _ enabled: Bool, streamIndex: Int32 = -1) throws {
-        updateMediaIntent(for: call.raw) { $0.cameraEnabled = enabled }
+    /// not exposed — see ``CallMediaIntent``). Enabling transmission once survives the
+    /// whole call; failure to resume is reported as `.videoTransmissionFailed`.
+    public func setVideoTransmission(_ call: CallID, enabled: Bool, streamIndex: Int32 = -1) throws {
+        updateMediaIntent(for: call.raw) { $0.transmitsVideo = enabled }
         var info = pjsua_call_info()
         guard pjsua_call_get_info(call.raw, &info).isSuccess else { return }
         let media = callMediaInfos(from: &info)
@@ -103,11 +113,11 @@ extension PJSUA {
     /// pjsua_vid.c). Maps onto SDP as `sendrecv` / `sendonly` / `recvonly` / `inactive`
     /// for `.encodingDecoding` / `.encoding` / `.decoding` / `.none`.
     ///
-    /// There is no SIP/RTP way to make the peer's camera turn *on*: `.decoding`
+    /// There is no SIP/RTP way to make the peer transmit video: `.decoding`
     /// (recvonly) is merely a request in the offer — the peer may still answer the line
     /// inactive or port 0. Going the other way *is* enforceable: an `.encoding`
     /// (sendonly) offer obliges a compliant peer to stop sending (RFC 3264 §5.1).
-    /// Note a sendonly stream reports `.localHold` status (pjsua_media.c) — "camera on"
+    /// Note a sendonly stream reports `.localHold` status (pjsua_media.c) — "transmitting"
     /// is not the same as "media active", which is why ``CallMediaIntent`` tracks the
     /// want separately. Setting anything but `.none` also records
     /// ``CallMediaIntent/acceptsVideo`` `= true` (we are offering video).

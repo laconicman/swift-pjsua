@@ -6,7 +6,7 @@ import XCTest
 /// engine-side state the call APIs record whether or not media exists yet. (`CallID(0)`
 /// rather than a huge id — pjsua asserts on out-of-range ids, and the in-range-but-empty
 /// slot is exactly the "call with no media" case.) The *application* of the intent —
-/// fail-closed mic wiring, camera re-arm after a rebuild, `on_call_rx_offer` — is the
+/// fail-closed mic wiring, video-transmission re-arm after a rebuild, `on_call_rx_offer` — is the
 /// Offhook live suite's job (test06c), not this one's.
 final class MediaIntentTests: XCTestCase {
 
@@ -34,21 +34,21 @@ final class MediaIntentTests: XCTestCase {
         XCTAssertFalse(intent.microphoneMuted)
     }
 
-    /// `setCameraEnabled` on a call with no video stream records the intent and does not
+    /// `setVideoTransmission` on a call with no video stream records the intent and does not
     /// throw — it is applied when a stream next becomes active (`on_call_media_state` →
     /// the actor's START_TRANSMIT), not rejected because none exists yet.
-    func testCameraEnabledRecordsIntentWithoutVideoStream() async throws {
+    func testTransmitsVideoRecordsIntentWithoutVideoStream() async throws {
         let engine = PJSUA()
         self.engine = engine
         try await engine.start(PJSUA.Configuration())
 
-        try await engine.setCameraEnabled(CallID(0), true)
+        try await engine.setVideoTransmission(CallID(0), enabled: true)
         var intent = await engine.mediaIntent(for: CallID(0))
-        XCTAssertTrue(intent.cameraEnabled)
+        XCTAssertTrue(intent.transmitsVideo)
 
-        try await engine.setCameraEnabled(CallID(0), false)
+        try await engine.setVideoTransmission(CallID(0), enabled: false)
         intent = await engine.mediaIntent(for: CallID(0))
-        XCTAssertFalse(intent.cameraEnabled)
+        XCTAssertFalse(intent.transmitsVideo)
     }
 
     /// `acceptsVideo` defaults to `true` and round-trips through `setAcceptsVideo` —
@@ -72,7 +72,7 @@ final class MediaIntentTests: XCTestCase {
 
     /// Clearing an entry returns the call to defaults. `on_call_state` runs this on
     /// `.disconnected` precisely because pjsua recycles call ids — a recycled id must
-    /// not inherit the previous call's mute/camera/policy. (A real disconnect needs a
+    /// not inherit the previous call's mute/transmission/policy. (A real disconnect needs a
     /// peer; the clear path itself is what is under test here.)
     func testClearedIntentReturnsToDefaults() async throws {
         let engine = PJSUA()
@@ -80,7 +80,7 @@ final class MediaIntentTests: XCTestCase {
         try await engine.start(PJSUA.Configuration())
 
         try await engine.setMute(CallID(0), muted: true)
-        try await engine.setCameraEnabled(CallID(0), true)
+        try await engine.setVideoTransmission(CallID(0), enabled: true)
         await engine.setAcceptsVideo(CallID(0), false)
         clearMediaIntent(for: 0)
 

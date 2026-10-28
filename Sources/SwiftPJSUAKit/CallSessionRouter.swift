@@ -317,12 +317,12 @@ public actor CallSessionRouter {
             let call = try await engine.makeCall(to: action.handle.value, from: account, video: action.isVideo)
             await bind(call: call, to: action.callUUID, hasVideo: action.isVideo)
             // An outgoing video call is the one place the system control expresses
-            // "send video" (`CXStartCallAction.isVideo`), so record the camera intent:
+            // "send video" (`CXStartCallAction.isVideo`), so record the video-transmission intent:
             // the engine re-applies it after every media rebuild. For answers neither
-            // CallKit nor LiveCommunicationKit carries a video flag — the camera on an
-            // incoming call is the app's decision (`PJSUA.setCameraEnabled`).
+            // CallKit nor LiveCommunicationKit carries a video flag — transmission on an
+            // incoming call is the app's decision (`PJSUA.setVideoTransmission`).
             if action.isVideo {
-                try await engine.setCameraEnabled(call, true)
+                try await engine.setVideoTransmission(call, enabled: true)
             }
             pending[action.callUUID] = .connect(action)
             // Outbound dialing has begun; connecting/connected are reported on .early/.confirmed.
@@ -338,8 +338,8 @@ public actor CallSessionRouter {
         }
         do {
             // Receive-only by default via the recorded intent (`acceptVideo: nil`) — an
-            // offered video m-line is accepted so remote video renders, but our camera
-            // stays off until the app enables it (`PJSUA.setCameraEnabled`); the app may
+            // offered video m-line is accepted so remote video renders, but our video
+            // stays untransmitted until the app enables it (`PJSUA.setVideoTransmission`); the app may
             // `setAcceptsVideo(false)` while the call rings to decline the line.
             try await engine.answer(call)
             // Apple: do NOT fulfill yet — wait for the connection (.confirmed).
@@ -516,11 +516,11 @@ public actor CallSessionRouter {
                 await registry.bind(call: newCall, to: uuid)
             }
 
-        case .streamDestroyed, .callMediaEvent, .cameraStartFailed:
+        case .streamDestroyed, .callMediaEvent, .videoTransmissionFailed:
             // No CallKit mapping either, and deliberately not invented: neither event ends a
             // call, and CallKit has no vocabulary for "still connected, but the media is dead"
-            // or "the camera would not come back". Already forwarded to the eventObserver
-            // above — end-of-stream statistics, media-failure and camera-failure policy are
+            // or "video transmission would not come back". Already forwarded to the eventObserver
+            // above — end-of-stream statistics, media-failure and transmission-failure policy are
             // the app's (offhook OH-10).
             break
 

@@ -8,7 +8,7 @@
 /// `pjsua_vid_channel_update()` (pjsua_vid.c) starts the rebuilt video stream paused in
 /// the encoding direction, setting capture up only `if (!call->local_hold &&
 /// acc->cfg.vid_out_auto_transmit)` — a flag the engine deliberately keeps `PJ_FALSE`
-/// (the pjsua default) and does not expose. So after *every* rebuild the camera is off
+/// (the pjsua default) and does not expose. So after *every* rebuild the stream transmits nothing
 /// until something issues `PJSUA_CALL_VID_STRM_START_TRANSMIT`, and after every rebuild
 /// the mic bridge would default to connected. The user's choice must live somewhere the
 /// rebuild cannot reset: here.
@@ -16,11 +16,11 @@
 /// It lives in the engine, not in a Kit, because mute and hold are *system* actions —
 /// CallKit's `CXSetMutedCallAction`/`CXSetHeldCallAction` and LiveCommunicationKit's
 /// `MuteConversationAction` both reach the engine while the app may not be running its
-/// own in-call UI — and neither kit carries a per-call "send camera" flag, so the
-/// camera half of the intent is Kit-agnostic state only the engine can hold.
+/// own in-call UI — and neither kit carries a per-call "transmit video" flag, so the
+/// transmission half of the intent is Kit-agnostic state only the engine can hold.
 ///
 /// One more reason it cannot be derived from pjsua status: a sendonly video stream is
-/// reported as `PJSUA_CALL_MEDIA_LOCAL_HOLD` (pjsua_media.c), so "camera on" ≠
+/// reported as `PJSUA_CALL_MEDIA_LOCAL_HOLD` (pjsua_media.c), so "transmitting" ≠
 /// "media active" — the intent has to be tracked separately.
 ///
 /// Stored per call (keyed by `pjsua_call_id`) in `PJSUACallbacks.swift`, guarded by
@@ -34,14 +34,14 @@ public struct CallMediaIntent: Sendable, Equatable {
     /// in `on_call_media_state` so a muted call never comes up with a live mic.
     public var microphoneMuted = false
 
-    /// `setCameraEnabled` — the user wants local video transmitted on this call.
+    /// `setVideoTransmission` — the user wants local video transmitted on this call.
     /// Re-applied as `PJSUA_CALL_VID_STRM_START_TRANSMIT` after every media rebuild
     /// (hold/unhold/re-INVITE) by the engine itself; the app does not re-issue it.
     /// While the call is on local hold it is applied nowhere — the audio stream's
     /// `.localHold` status is the engine's proxy for pjsua's own `!call->local_hold`
     /// guard (`pjsua_vid_channel_update`, pjsua_vid.c), which `pjsua_call_info` does
     /// not expose.
-    public var cameraEnabled = false
+    public var transmitsVideo = false
 
     /// Policy for the *remote's* video offers: the initial `answer` and every incoming
     /// re-INVITE/UPDATE offer (`on_call_rx_offer`). `false` answers the video m-line
@@ -52,10 +52,10 @@ public struct CallMediaIntent: Sendable, Equatable {
     public var acceptsVideo = true
 
     public init(microphoneMuted: Bool = false,
-                cameraEnabled: Bool = false,
+                transmitsVideo: Bool = false,
                 acceptsVideo: Bool = true) {
         self.microphoneMuted = microphoneMuted
-        self.cameraEnabled = cameraEnabled
+        self.transmitsVideo = transmitsVideo
         self.acceptsVideo = acceptsVideo
     }
 }

@@ -78,13 +78,14 @@ public enum PJSUAEvent: Sendable {
                               statusCode: Int32, statusText: String)
 
     /// The engine could not resume video capture while re-applying
-    /// ``CallMediaIntent/cameraEnabled`` after a media change (hold/unhold/re-INVITE —
-    /// see `PJSUA.reapplyCameraIntent`). `status` is the `pj_status_t` pjsua returned;
-    /// typical causes are camera permission denied, the device locked or backgrounded,
-    /// or the capture device busy. The call itself is unaffected. The app decides the
-    /// reaction — e.g. surface "camera unavailable", or retry with
-    /// ``PJSUA/setCameraEnabled(_:_:streamIndex:)`` once the obstruction is gone.
-    case cameraStartFailed(call: CallID, status: Int32)
+    /// ``CallMediaIntent/transmitsVideo`` after a media change (hold/unhold/re-INVITE —
+    /// see `PJSUA.reapplyVideoTransmission`). `status` is the `pj_status_t` pjsua returned;
+    /// typical causes are the capture device unavailable (permission denied, device
+    /// locked or backgrounded, busy) or an encoder-start failure. The call itself is
+    /// unaffected. The app decides the
+    /// reaction — e.g. surface "video unavailable", or retry with
+    /// ``PJSUA/setVideoTransmission(_:_:streamIndex:)`` once the obstruction is gone.
+    case videoTransmissionFailed(call: CallID, status: Int32)
 }
 
 /// The `pjsua_ip_change_op` step currently being reported by `.ipChangeProgress`.

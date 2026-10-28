@@ -263,22 +263,12 @@ public actor CallSessionRouter {
         guard isNew else {
             Self.logger.notice("call \(uuid, privacy: .public) already reported to CallKit")
             if hasVideo, !knewVideo {
-                let update = CXCallUpdate()
-                update.hasVideo = true
-                provider.reportCall(with: uuid, updated: update)
+                provider.reportCall(with: uuid, updated: callUpdate(handle: handle, hasVideo: true))
             }
             return uuid
         }
 
-        let update = CXCallUpdate()
-        update.remoteHandle = CXHandle(type: .generic, value: handle)
-        update.hasVideo = hasVideo
-        update.supportsHolding = true
-        update.supportsDTMF = true
-        // Advertise local conferencing so CallKit offers merge/split, mapped to the conference
-        // bridge in setGroup(_:) (§7.1 / §10).
-        update.supportsGrouping = true
-        update.supportsUngrouping = true
+        let update = callUpdate(handle: handle, hasVideo: hasVideo)
         let epoch = resetEpoch
         do {
             try await provider.reportNewIncomingCall(with: uuid, update: update)
@@ -289,6 +279,22 @@ public actor CallSessionRouter {
         }
         await concludeAcceptedReport(uuid: uuid, epoch: epoch)
         return uuid
+    }
+
+    /// The `CXCallUpdate` for an incoming report — and for the push-first video
+    /// upgrade (`reportCall(with:updated:)`), which replaces the update wholesale:
+    /// sending only `hasVideo` would drop the supports-* flags CallKit already saw.
+    private func callUpdate(handle: String, hasVideo: Bool) -> CXCallUpdate {
+        let update = CXCallUpdate()
+        update.remoteHandle = CXHandle(type: .generic, value: handle)
+        update.hasVideo = hasVideo
+        update.supportsHolding = true
+        update.supportsDTMF = true
+        // Advertise local conferencing so CallKit offers merge/split, mapped to the conference
+        // bridge in setGroup(_:) (§7.1 / §10).
+        update.supportsGrouping = true
+        update.supportsUngrouping = true
+        return update
     }
 
     /// Finish a CallKit-accepted report. If `reset()` interleaved while CallKit was

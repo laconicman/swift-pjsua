@@ -69,6 +69,10 @@ extension PJSUA {
             // `strm.v.cap_dev` when no capture window is up yet (`cap_win_id ==
             // PJSUA_INVALID_ID`); it takes effect when capture is set up. A pjsua error
             // here is thrown as-is — the direction change already went out.
+            // We are offering video — recorded as soon as the offer is out, BEFORE the
+            // device switch below: a CHANGE_CAP_DEV failure must throw but must not
+            // leave the intent unset for an offer that already went out.
+            updateMediaIntent(for: call.raw) { $0.acceptsVideo = true }
             if captureDevice != -1 {
                 try setVideoStream(call, PJSUA_CALL_VID_STRM_CHANGE_CAP_DEV) {
                     $0.med_idx = Int32(disabled.index)
@@ -77,10 +81,8 @@ extension PJSUA {
             }
         } else {
             try setVideoStream(call, PJSUA_CALL_VID_STRM_ADD) { $0.cap_dev = captureDevice }
+            updateMediaIntent(for: call.raw) { $0.acceptsVideo = true }
         }
-        // We are offering video — refusing the peer's answer-side re-offers of that
-        // line would be incoherent. Recorded only once the offer was signalled.
-        updateMediaIntent(for: call.raw) { $0.acceptsVideo = true }
     }
 
     /// Remove / disable an existing video stream, re-INVITE-ing the peer (downgrade to audio).

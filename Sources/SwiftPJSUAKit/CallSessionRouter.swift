@@ -263,7 +263,8 @@ public actor CallSessionRouter {
         guard isNew else {
             Self.logger.notice("call \(uuid, privacy: .public) already reported to CallKit")
             if hasVideo, !knewVideo {
-                provider.reportCall(with: uuid, updated: callUpdate(handle: handle, hasVideo: true))
+                // handle: nil — do not overwrite the remote handle the push reported.
+                provider.reportCall(with: uuid, updated: callUpdate(handle: nil, hasVideo: true))
             }
             return uuid
         }
@@ -284,9 +285,13 @@ public actor CallSessionRouter {
     /// The `CXCallUpdate` for an incoming report — and for the push-first video
     /// upgrade (`reportCall(with:updated:)`), which replaces the update wholesale:
     /// sending only `hasVideo` would drop the supports-* flags CallKit already saw.
-    private func callUpdate(handle: String, hasVideo: Bool) -> CXCallUpdate {
+    /// `handle: nil` leaves `remoteHandle` unset — `reportCall(with:updated:)` ignores
+    /// nil properties, so the upgrade does not overwrite the handle the push reported.
+    private func callUpdate(handle: String?, hasVideo: Bool) -> CXCallUpdate {
         let update = CXCallUpdate()
-        update.remoteHandle = CXHandle(type: .generic, value: handle)
+        if let handle {
+            update.remoteHandle = CXHandle(type: .generic, value: handle)
+        }
         update.hasVideo = hasVideo
         update.supportsHolding = true
         update.supportsDTMF = true

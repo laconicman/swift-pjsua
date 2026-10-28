@@ -55,7 +55,6 @@ extension PJSUA {
     /// Also records ``CallMediaIntent/acceptsVideo`` `= true`: we are offering video, so
     /// refusing the peer's answer-side re-offers of that line would be incoherent.
     public func addVideoStream(to call: CallID, captureDevice: Int32 = -1) throws {
-        updateMediaIntent(for: call.raw) { $0.acceptsVideo = true }
         var info = pjsua_call_info()
         if pjsua_call_get_info(call.raw, &info).isSuccess,
            let disabled = callMediaInfos(from: &info)
@@ -64,9 +63,24 @@ extension PJSUA {
                 $0.med_idx = Int32(disabled.index)
                 $0.dir = PJMEDIA_DIR_ENCODING_DECODING
             }
+            // CHANGE_DIR takes no device (`call_modify_video` has no cap_dev), so the
+            // requested device is applied separately on the explicit index — safe while
+            // the re-INVITE is in flight because `call_change_cap_dev` only stores
+            // `strm.v.cap_dev` when no capture window is up yet (`cap_win_id ==
+            // PJSUA_INVALID_ID`); it takes effect when capture is set up. A pjsua error
+            // here is thrown as-is — the direction change already went out.
+            if captureDevice != -1 {
+                try setVideoStream(call, PJSUA_CALL_VID_STRM_CHANGE_CAP_DEV) {
+                    $0.med_idx = Int32(disabled.index)
+                    $0.cap_dev = captureDevice
+                }
+            }
         } else {
             try setVideoStream(call, PJSUA_CALL_VID_STRM_ADD) { $0.cap_dev = captureDevice }
         }
+        // We are offering video — refusing the peer's answer-side re-offers of that
+        // line would be incoherent. Recorded only once the offer was signalled.
+        updateMediaIntent(for: call.raw) { $0.acceptsVideo = true }
     }
 
     /// Remove / disable an existing video stream, re-INVITE-ing the peer (downgrade to audio).

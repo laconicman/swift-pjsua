@@ -227,6 +227,14 @@ public actor CallSessionRouter {
         await registry.entry(for: uuid) != nil
     }
 
+    /// Whether `uuid`'s call carries video — the `hasVideo` recorded at report time
+    /// (incoming) or from `CXStartCallAction.isVideo` (outgoing). `CallKitController`
+    /// reads it when the user answers, to pick the `AVAudioSession` mode before the SIP
+    /// answer goes out (`CXAnswerCallAction` itself carries no video flag).
+    public func hasVideo(_ uuid: UUID) async -> Bool {
+        await registry.entry(for: uuid)?.hasVideo ?? false
+    }
+
     // MARK: Incoming report (push or socket)
 
     /// Report a new incoming call to CallKit, deduplicated via ``CallIdentity`` / ``CallRegistry``.
@@ -246,7 +254,8 @@ public actor CallSessionRouter {
         let uuid = CallIdentity.uuid(serverProvided: serverUUID, sipCallID: sipCallID)
         if let call { uuidByCall[call] = uuid }
 
-        let isNew = await registry.firstSeen(uuid: uuid, sipCallID: sipCallID, call: call)
+        let isNew = await registry.firstSeen(uuid: uuid, sipCallID: sipCallID, call: call,
+                                             hasVideo: hasVideo)
         guard isNew else {
             Self.logger.notice("call \(uuid, privacy: .public) already reported to CallKit")
             return uuid
@@ -306,7 +315,15 @@ public actor CallSessionRouter {
         }
         do {
             let call = try await engine.makeCall(to: action.handle.value, from: account, video: action.isVideo)
-            await bind(call: call, to: action.callUUID)
+            await bind(call: call, to: action.callUUID, hasVideo: action.isVideo)
+            // An outgoing video call is the one place the system control expresses
+            // "send video" (`CXStartCallAction.isVideo`), so record the camera intent:
+            // the engine re-applies it after every media rebuild. For answers neither
+            // CallKit nor LiveCommunicationKit carries a video flag — the camera on an
+            // incoming call is the app's decision (`PJSUA.setCameraEnabled`).
+            if action.isVideo {
+                try await engine.setCameraEnabled(call, true)
+            }
             pending[action.callUUID] = .connect(action)
             // Outbound dialing has begun; connecting/connected are reported on .early/.confirmed.
         } catch {
@@ -320,6 +337,10 @@ public actor CallSessionRouter {
             return
         }
         do {
+            // Receive-only by default via the recorded intent (`acceptVideo: nil`) — an
+            // offered video m-line is accepted so remote video renders, but our camera
+            // stays off until the app enables it (`PJSUA.setCameraEnabled`); the app may
+            // `setAcceptsVideo(false)` while the call rings to decline the line.
             try await engine.answer(call)
             // Apple: do NOT fulfill yet — wait for the connection (.confirmed).
             pending[action.callUUID] = .connect(action)
@@ -361,8 +382,11 @@ public actor CallSessionRouter {
             return
         }
         do {
+            // Local conference re-wire; no signalling, so resolve immediately. The engine
+            // records it as intent (`CallMediaIntent.microphoneMuted`), so the mute now
+            // also survives a hold/resume or re-INVITE stream rebuild.
             try await engine.setMute(call, muted: action.isMuted)
-            action.fulfill() // local conference re-wire; no signalling, so resolve immediately.
+            action.fulfill()
         } catch {
             action.fail()
         }
@@ -492,11 +516,12 @@ public actor CallSessionRouter {
                 await registry.bind(call: newCall, to: uuid)
             }
 
-        case .streamDestroyed, .callMediaEvent:
+        case .streamDestroyed, .callMediaEvent, .cameraStartFailed:
             // No CallKit mapping either, and deliberately not invented: neither event ends a
-            // call, and CallKit has no vocabulary for "still connected, but the media is dead".
-            // Already forwarded to the eventObserver above — end-of-stream statistics and
-            // media-failure policy are the app's (offhook OH-10).
+            // call, and CallKit has no vocabulary for "still connected, but the media is dead"
+            // or "the camera would not come back". Already forwarded to the eventObserver
+            // above — end-of-stream statistics, media-failure and camera-failure policy are
+            // the app's (offhook OH-10).
             break
 
         case .ipChangeProgress:
@@ -645,10 +670,11 @@ public actor CallSessionRouter {
 
     /// Bind an engine ``CallID`` to a CallKit `UUID` in both the reverse index and the registry.
     /// `firstSeen` creates the registry entry when missing (outgoing calls, which are never
-    /// "reported" as incoming) and merges the `CallID` onto an existing entry otherwise.
-    private func bind(call: CallID, to uuid: UUID) async {
+    /// "reported" as incoming — `hasVideo` records `CXStartCallAction.isVideo` there) and
+    /// merges the `CallID` onto an existing entry otherwise.
+    private func bind(call: CallID, to uuid: UUID, hasVideo: Bool = false) async {
         uuidByCall[call] = uuid
-        await registry.firstSeen(uuid: uuid, call: call)
+        await registry.firstSeen(uuid: uuid, call: call, hasVideo: hasVideo)
     }
 
     /// Reap pending registry entries whose INVITE never arrived and withdraw their still-ringing

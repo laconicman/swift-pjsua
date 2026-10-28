@@ -42,6 +42,13 @@ public actor PJSUA {
     /// read by a task on this actor from ``start(_:)`` on. See `PJSUA+RegistrationLifecycle.swift`.
     nonisolated let registrationSignals: AsyncStream<RegistrationSignal>
 
+    /// The engine's own camera-intent channel: `on_call_media_state` yields a call here
+    /// when a rebuilt video stream needs ``CallMediaIntent/cameraEnabled`` re-applied —
+    /// applying it means `pjsua_call_set_vid_strm` (opens an `AVCaptureSession`), far too
+    /// slow for the callback's dialog-lock context. Read by a task on this actor from
+    /// ``start(_:)`` on, like ``registrationSignals``.
+    nonisolated let cameraIntentSignals: AsyncStream<CallID>
+
     /// Registration bookkeeping, kept from this actor's own calls and from `registrationSignals`.
     var registration = RegistrationLifecycle()
 
@@ -163,6 +170,7 @@ public actor PJSUA {
         self.events = streams.events
         self.callEvents = streams.callEvents
         self.registrationSignals = streams.registrationSignals
+        self.cameraIntentSignals = streams.cameraIntentSignals
         self.executor = PJSIPExecutor()
     }
 
@@ -313,6 +321,44 @@ public actor PJSUA {
             for await signal in registrationSignals {
                 await self?.applyRegistrationSignal(signal)
             }
+        }
+
+        // Same lifetime for the camera-intent signals: `pjsuaOnCallMediaState` defers the
+        // expensive `START_TRANSMIT` here so it runs on the engine thread, off the dialog lock.
+        Task { [weak self, cameraIntentSignals] in
+            for await call in cameraIntentSignals {
+                await self?.reapplyCameraIntent(call)
+            }
+        }
+    }
+
+    /// Re-apply the camera half of ``CallMediaIntent`` after a video-stream rebuild
+    /// (hold/unhold/re-INVITE) — the second half of the signal path that starts in
+    /// `pjsuaOnCallMediaState`. The intent is re-read rather than carried on the signal:
+    /// it may have changed while the notice was in flight (the user disabled the camera
+    /// between the rebuild and this turn), and the current value is the honest one.
+    /// `call_set_tx_video` (pjsua_vid.c) sets capture up itself when the rebuild released
+    /// it (`cap_win_id == PJSUA_INVALID_ID`) and resumes the stream's encoding leg.
+    ///
+    /// A failure reaches the app as `.cameraStartFailed` on the guaranteed channel —
+    /// camera permission, the device locked/backgrounded, or the device busy; the app
+    /// reacts (e.g. shows "camera unavailable", or retries with ``setCameraEnabled(_:_:streamIndex:)``).
+    private func reapplyCameraIntent(_ call: CallID) {
+        guard SwiftPJSUA.mediaIntent(for: call.raw).cameraEnabled else { return }
+        // The signal may have been queued before a local hold arrived: the audio
+        // stream's `.localHold` status is the same proxy the callback uses for
+        // pjsua's `!call->local_hold` guard — never start the camera while held.
+        var info = pjsua_call_info()
+        if pjsua_call_get_info(call.raw, &info).isSuccess,
+           callMediaInfos(from: &info)
+               .contains(where: { $0.kind == .audio && $0.status == .localHold }) {
+            return
+        }
+        var param = pjsua_call_vid_strm_op_param()
+        pjsua_call_vid_strm_op_param_default(&param)
+        let status = pjsua_call_set_vid_strm(call.raw, PJSUA_CALL_VID_STRM_START_TRANSMIT, &param)
+        if !status.isSuccess {
+            emitCallEvent(.cameraStartFailed(call: call, status: Int32(status)))
         }
     }
 

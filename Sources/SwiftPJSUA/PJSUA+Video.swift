@@ -10,6 +10,17 @@ extension PJSUA {
     // tweaked. ADD/REMOVE/CHANGE_DIR re-INVITE the peer; START/STOP_TRANSMIT,
     // CHANGE_CAP_DEV and SEND_KEYFRAME are local-only (no signalling).
     //
+    // **A negotiated video stream starts paused.** `pjsua_vid_channel_update()`
+    // (pjsua_vid.c) starts the rebuilt stream then pauses it in the encoding direction;
+    // capture is set up only `if (!call->local_hold && acc->cfg.vid_out_auto_transmit)`.
+    // The engine keeps `vid_out_auto_transmit` at its `PJ_FALSE` default and does not
+    // expose it — pjsua's flag answers "when should the camera turn on" once, at
+    // negotiate time, while ``CallMediaIntent/cameraEnabled`` answers it as a standing
+    // user choice the engine re-applies after every rebuild (every direction change
+    // makes `is_media_changed()` in pjsua_media.c tear down and rebuild the stream:
+    // hold, unhold, remote hold, codec or IP-change re-INVITE). So the camera API here
+    // is intent-based (`setCameraEnabled`), not one-shot.
+    //
     // The engine shapes the full video *surface* (D-VIDEO sign-off); actual pixel rendering
     // (MetalKit / `UIView`) is the Offhook app's job. The package already links CoreVideo /
     // VideoToolbox / MetalKit for that consumer.
@@ -19,11 +30,33 @@ extension PJSUA {
     // - pjsua1 video window + video conference bridge APIs (pjsua.h).
     // - PJSUA2 video call handling — <https://docs.pjsip.org/en/latest/>.
 
-    /// Add a new video stream (a new `m=video` line) to the call, re-INVITE-ing the peer. Used
-    /// to upgrade an audio call to video. `captureDevice` is a `pjmedia_vid_dev_index`; `-1`
-    /// (the default) is `PJMEDIA_VID_DEFAULT_CAPTURE_DEV` — the account's configured camera.
+    /// Add video to the call, re-INVITE-ing the peer. Used to upgrade an audio call to
+    /// video. `captureDevice` is a `pjmedia_vid_dev_index`; `-1` (the default) is
+    /// `PJMEDIA_VID_DEFAULT_CAPTURE_DEV` — the account's configured camera.
+    ///
+    /// When the call already carries a *disabled* video line (`status == .none` — a
+    /// video offer it declined or a line `removeVideoStream` took down) this re-enables
+    /// that line with `PJSUA_CALL_VID_STRM_CHANGE_DIR` (ENCODING_DECODING) on its index
+    /// instead: `call_add_video` (pjsua_vid.c) always *appends* a new m-line, while
+    /// `call_modify_video` is the path that turns a port-0 line back on ("Create new SDP
+    /// media line if the stream is disabled"). A second appended line is not what an
+    /// upgrade means.
+    ///
+    /// Also records ``CallMediaIntent/acceptsVideo`` `= true`: we are offering video, so
+    /// refusing the peer's answer-side re-offers of that line would be incoherent.
     public func addVideoStream(to call: CallID, captureDevice: Int32 = -1) throws {
-        try setVideoStream(call, PJSUA_CALL_VID_STRM_ADD) { $0.cap_dev = captureDevice }
+        updateMediaIntent(for: call.raw) { $0.acceptsVideo = true }
+        var info = pjsua_call_info()
+        if pjsua_call_get_info(call.raw, &info).isSuccess,
+           let disabled = callMediaInfos(from: &info)
+               .first(where: { $0.kind == .video && $0.status == .none }) {
+            try setVideoStream(call, PJSUA_CALL_VID_STRM_CHANGE_DIR) {
+                $0.med_idx = Int32(disabled.index)
+                $0.dir = PJMEDIA_DIR_ENCODING_DECODING
+            }
+        } else {
+            try setVideoStream(call, PJSUA_CALL_VID_STRM_ADD) { $0.cap_dev = captureDevice }
+        }
     }
 
     /// Remove / disable an existing video stream, re-INVITE-ing the peer (downgrade to audio).
@@ -32,15 +65,70 @@ extension PJSUA {
         try setVideoStream(call, PJSUA_CALL_VID_STRM_REMOVE) { $0.med_idx = streamIndex }
     }
 
-    /// Resume transmitting local video on an existing stream (local-only; no re-INVITE).
-    public func startVideoTransmission(_ call: CallID, streamIndex: Int32 = -1) throws {
-        try setVideoStream(call, PJSUA_CALL_VID_STRM_START_TRANSMIT) { $0.med_idx = streamIndex }
+    /// Turn the local camera on or off for this call — the "send my video" switch
+    /// (local-only; no re-INVITE). Recorded as ``CallMediaIntent/cameraEnabled`` first,
+    /// then applied as `PJSUA_CALL_VID_STRM_START/STOP_TRANSMIT` (`call_set_tx_video`,
+    /// pjsua_vid.c — it sets capture up itself when the stream has none) when the call
+    /// currently has a video stream with an encoding direction; otherwise only recorded.
+    ///
+    /// The engine re-applies the recorded intent after every media rebuild — a video
+    /// stream comes back from hold/unhold/re-INVITE with capture released and the
+    /// encoder paused (`pjsua_vid_channel_update`; the account flag
+    /// `vid_out_auto_transmit` that would resume it is deliberately kept `PJ_FALSE` and
+    /// not exposed — see ``CallMediaIntent``). Enabling the camera once survives the
+    /// whole call; failure to resume is reported as `.cameraStartFailed`.
+    public func setCameraEnabled(_ call: CallID, _ enabled: Bool, streamIndex: Int32 = -1) throws {
+        updateMediaIntent(for: call.raw) { $0.cameraEnabled = enabled }
+        var info = pjsua_call_info()
+        guard pjsua_call_get_info(call.raw, &info).isSuccess else { return }
+        let media = callMediaInfos(from: &info)
+        // An audio stream on local hold proxies the call-level local hold pjsua guards
+        // with `!call->local_hold` (`pjsua_vid_channel_update`, not exposed on
+        // `pjsua_call_info`): while held this records only — the resume rebuild re-applies.
+        if media.contains(where: { $0.kind == .audio && $0.status == .localHold }) { return }
+        let hasEncodingVideo = media.contains {
+            $0.kind == .video
+                && (streamIndex < 0 || $0.index == Int(streamIndex))
+                && ($0.direction == .encoding || $0.direction == .encodingDecoding)
+        }
+        guard hasEncodingVideo else { return } // applied when the stream next rebuilds
+        try setVideoStream(call,
+                           enabled ? PJSUA_CALL_VID_STRM_START_TRANSMIT
+                                   : PJSUA_CALL_VID_STRM_STOP_TRANSMIT) {
+            $0.med_idx = streamIndex
+        }
     }
 
-    /// Pause transmitting local video on an existing stream — stops sending packets while
-    /// keeping the stream negotiated (local-only; no re-INVITE).
-    public func stopVideoTransmission(_ call: CallID, streamIndex: Int32 = -1) throws {
-        try setVideoStream(call, PJSUA_CALL_VID_STRM_STOP_TRANSMIT) { $0.med_idx = streamIndex }
+    /// Change a video stream's negotiated direction — a re-INVITE (`call_modify_video`,
+    /// pjsua_vid.c). Maps onto SDP as `sendrecv` / `sendonly` / `recvonly` / `inactive`
+    /// for `.encodingDecoding` / `.encoding` / `.decoding` / `.none`.
+    ///
+    /// There is no SIP/RTP way to make the peer's camera turn *on*: `.decoding`
+    /// (recvonly) is merely a request in the offer — the peer may still answer the line
+    /// inactive or port 0. Going the other way *is* enforceable: an `.encoding`
+    /// (sendonly) offer obliges a compliant peer to stop sending (RFC 3264 §5.1).
+    /// Note a sendonly stream reports `.localHold` status (pjsua_media.c) — "camera on"
+    /// is not the same as "media active", which is why ``CallMediaIntent`` tracks the
+    /// want separately. Setting anything but `.none` also records
+    /// ``CallMediaIntent/acceptsVideo`` `= true` (we are offering video).
+    public func setVideoDirection(_ call: CallID, _ direction: CallMediaInfo.Direction,
+                                  streamIndex: Int32 = -1) throws {
+        let dir: pjmedia_dir
+        switch direction {
+        case .none:              dir = PJMEDIA_DIR_NONE
+        case .encoding:          dir = PJMEDIA_DIR_ENCODING
+        case .decoding:          dir = PJMEDIA_DIR_DECODING
+        case .encodingDecoding:  dir = PJMEDIA_DIR_ENCODING_DECODING
+        case .unknown(let raw):
+            preconditionFailure("setVideoDirection: cannot signal an unknown direction (\(raw))")
+        }
+        if direction != .none {
+            updateMediaIntent(for: call.raw) { $0.acceptsVideo = true }
+        }
+        try setVideoStream(call, PJSUA_CALL_VID_STRM_CHANGE_DIR) {
+            $0.med_idx = streamIndex
+            $0.dir = dir
+        }
     }
 
     /// Switch the capture device (camera) feeding a video stream — e.g. front ↔ back camera

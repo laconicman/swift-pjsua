@@ -479,6 +479,33 @@ chosen; not measured on a device.
 - **Possible refinement:** skip the wait for a session whose transport the sequence shuts down
   anyway, which needs the transport identity TD-31 lists.
 
+## TD-33 — pjsua `vid_out_auto_transmit` / `vid_in_auto_show` as configuration knobs · open (undecided)
+
+Two per-account pjsua flags the engine sets but does not expose:
+
+- `vid_out_auto_transmit` — start transmitting local video as soon as a video stream is
+  negotiated (initial call and every rebuild; `pjsua_vid_channel_update`, pjsua_vid.c).
+  Kept `PJ_FALSE`, the pjsua default.
+- `vid_in_auto_show` — show the incoming-video window by default. Pinned `PJ_TRUE`:
+  the window is just a `UIView` the app embeds, and hidden-by-default would trap every
+  app into needing `showVideoWindow` before anything renders.
+
+**Why the intent model supersedes them.** Both flags answer "should video go out/in" at
+negotiate time, once. `CallMediaIntent` (#38) answers it as a standing per-call user
+choice, re-applied synchronously after every stream rebuild — which is what actually
+keeps the camera off (default) or on (intent) across hold/unhold/re-INVITE, and what
+fixed the muted-call-comes-back-live bug. `vid_out_auto_transmit` additionally cannot
+express "camera on for *this* call only" — it is per-account, not per-call.
+
+**What real-world usage would justify exposing them:** none found. The industry shape is
+liblinphone's `VideoActivationPolicy {automaticallyInitiate, automaticallyAccept,
+automaticallyAcceptDirection}` — which maps onto `makeCall(video:)` (initiate),
+`acceptsVideo`/`answer(acceptVideo:)` (accept) and `setVideoDirection` (direction), not
+onto pjsua's flags. Re-open if a consumer demonstrates a policy the intent model cannot
+express; the flags remain one struct field away if that ever happens.
+
+- Refs: `CallMediaIntent.swift`; design §6 "As-built (media intent, #38)".
+
 ## TD-23 — `reRegister` throws `PJSIP_EBUSY` on a *successful* credential rotation · **discharged 2026-10-11**
 **Discharged** by the registration lifecycle (`Registration-Lifecycle.md`). The analysis below had
 the cause right and the extent short. The trailing call also fired into a REGISTER in flight, which

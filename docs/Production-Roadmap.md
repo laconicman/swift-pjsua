@@ -439,11 +439,14 @@ payload contract (the VoIP one is Flexisip's, TD-2). **PR-b** added the video su
   calls, call transfer, early media. Expand the `PJSUA` actor surface accordingly.
 - **Video & conferences — delivered in PR-b** (design doc §6/§7 "As-built"):
   - **Video (D-VIDEO).** Engine wrappers in `PJSUA+Video.swift` — `addVideoStream` /
-    `removeVideoStream` / `startVideoTransmission` / `stopVideoTransmission` /
+    `removeVideoStream` / `setCameraEnabled` / `setVideoDirection` /
     `changeVideoCaptureDevice` / `sendVideoKeyframe` (all `pjsua_call_set_vid_strm`),
     `showVideoWindow` / `videoWindowInfo` (→ `VideoWindowInfo`), `videoConferenceSlot(of:sending:)`
-    + `connectVideo` / `disconnectVideo`; `makeCall(to:from:video:)` offers a video stream;
-    `CXStartCallAction.isVideo` is mapped through. Pixel rendering lives in the Offhook app.
+    + `connectVideo` / `disconnectVideo`; `makeCall(to:from:video:)` offers a video stream,
+    `answer(_:statusCode:acceptVideo:)` declines or keeps the recorded video intent;
+    `CXStartCallAction.isVideo` is mapped
+    through. Per-call media intent (`CallMediaIntent`, #38) keeps mic/camera/video-acceptance
+    across pjsua's media rebuilds. Pixel rendering lives in the Offhook app.
   - **Conferences (D-CONF).** Engine primitives in `PJSUA+Conference.swift` —
     `connectAudio(_:and:)` / `disconnectAudio(_:and:)` cross-connect call legs on the PJMEDIA
     bridge (local mixing), and `isConferenceFocus(_:)` detects the `;isfocus` `Contact` param

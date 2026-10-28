@@ -64,6 +64,36 @@ extension PJSUA {
         try disconnectAudioSlot(from: portB, to: portA)
     }
 
+    /// Whether the capture device (conference slot 0) is currently bridged **to** `call`'s
+    /// audio port — i.e. the mic is live on this call right now, as opposed to what
+    /// ``mediaIntent(for:)`` records the user wants. Diagnostic for tests and inspectors:
+    /// a muted-then-held call stays unbridged across the resume — that is the check
+    /// Offhook's media-intent test asserts. `false` when the call has no conference port
+    /// (no media yet, or torn down).
+    ///
+    /// Reads port 0's `pjsua_conf_port_info`: its `listeners` are the slots it transmits
+    /// to, and the call's port appears there exactly while `pjsua_conf_connect(0, port)`
+    /// stands. `listeners` is a fixed-size C array (a tuple in Swift), bounded by
+    /// `listener_cnt` — the same rebound-tuple read `callMediaInfos` uses.
+    ///
+    /// This reports the *applied* state: conf connect/disconnect are posted to the
+    /// conference worker thread, so a change lags the API call by a frame — poll, don't
+    /// read once, when asserting on a just-issued re-wire.
+    public func isMicrophoneBridged(to call: CallID) -> Bool {
+        let port = pjsua_call_get_conf_port(call.raw)
+        guard port >= 0 else { return false } // PJSUA_INVALID_ID == -1 — no media port
+        var info = pjsua_conf_port_info()
+        guard pjsua_conf_get_port_info(0, &info).isSuccess else { return false }
+        let capacity = MemoryLayout.size(ofValue: info.listeners)
+            / MemoryLayout<pjsua_conf_port_id>.size
+        let count = min(Int(info.listener_cnt), capacity)
+        return withUnsafePointer(to: &info.listeners) { tuplePtr in
+            tuplePtr.withMemoryRebound(to: pjsua_conf_port_id.self, capacity: count) { base in
+                (0..<count).contains { base[$0] == port }
+            }
+        }
+    }
+
     // MARK: Conference detection — server-hosted / focus (RFC 4579)
 
     /// Whether the remote party is a **conference focus** (RFC 4579): its `Contact` header

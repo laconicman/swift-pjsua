@@ -91,6 +91,11 @@ public enum PJSUAEvent: Sendable {
     /// unaffected. The app decides the
     /// reaction — e.g. surface "video unavailable", or retry with
     /// ``PJSUA/setVideoTransmission(_:enabled:)`` once the obstruction is gone.
+    ///
+    /// A direct ``PJSUA/setVideoTransmission(_:enabled:)`` call reports the same failure
+    /// by throwing instead; `SwiftPJSUAKit`'s router relays the throw from its outgoing
+    /// video-call path onto its event tap as this case, so the app observes one shape
+    /// (`-1` as `status` when the error was not a `PJSUAError`).
     case videoTransmissionFailed(call: CallID, status: Int32)
 }
 

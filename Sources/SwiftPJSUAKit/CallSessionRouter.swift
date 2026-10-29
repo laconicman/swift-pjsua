@@ -355,10 +355,16 @@ public actor CallSessionRouter {
             // The INVITE is out and the call is bound to CallKit's UUID; failing the action
             // here would strand a live SIP call outside CallKit. A capture failure (camera
             // denied or busy, early video whose capture would not start) is a video problem,
-            // not a call failure — the intent was recorded before the attempt, so the engine
-            // retries it on the next `on_call_media_state` (the answer's own included) and
-            // a failure that persists reaches the app as `.videoTransmissionFailed`.
+            // not a call failure. The intent stays recorded, so the engine re-applies it at
+            // the next media rebuild — but a final response without new SDP rebuilds nothing,
+            // and this attempt may be the last. Report it the way the engine reports its own
+            // re-apply failures, on the app's event tap, so the app sees the failure
+            // whether capture failed here or in `reapplyVideoTransmission`.
+            let status = (error as? PJSUAError)?.status ?? -1
             Self.logger.error("\(action.callUUID, privacy: .public): video transmission did not start: \(error, privacy: .public)")
+            deliverToObserver { [eventObserver] in
+                eventObserver?(.videoTransmissionFailed(call: call, status: status))
+            }
         }
     }
 

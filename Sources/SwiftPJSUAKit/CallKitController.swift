@@ -87,10 +87,14 @@ public final class CallKitController: NSObject, CXProviderDelegate {
     }
 
     public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
-        // Answer configures for voice; a video upgrade re-configures app-side when rendering
-        // lands (TD-6 era).
-        configureAudioSession(video: false)
-        Task { await router.answerCall(action) }
+        // `CXAnswerCallAction` carries no video flag — the registry's `hasVideo` (from
+        // the report's `CXCallUpdate.hasVideo`) says whether this call is video, so the
+        // audio session is configured before the answer goes out, as for startCall.
+        Task {
+            let video = await router.hasVideo(action.callUUID)
+            configureAudioSession(video: video)
+            await router.answerCall(action)
+        }
     }
 
     /// Category/mode configuration only (design §5): CallKit owns activation; the engine opens

@@ -33,6 +33,12 @@ public enum PJSUAEvent: Sendable {
     /// and lets it react per stream (audio → conference slot, video → window). The engine
     /// still performs the low-level audio conference-bridge wiring itself; see
     /// `pjsuaOnCallMediaState`.
+    ///
+    /// Also emitted once more after the engine re-applies ``CallMediaIntent/transmitsVideo``
+    /// following a rebuild (`PJSUA.reapplyVideoTransmission`): the callback's snapshot shows
+    /// the video stream as pjsua left it — paused, `videoCapture == false` — and the
+    /// follow-up carries the resumed capture, so `videoCapture` is observable rather than
+    /// inferred from the intent.
     case callMediaState(call: CallID, media: [CallMediaInfo])
 
     /// A media stream was torn down, carrying the **final** statistics for it — read inside the
@@ -76,6 +82,21 @@ public enum PJSUAEvent: Sendable {
     /// the final response pjsua sent.
     case incomingCallRejected(call: CallID?, sipCallID: String?, from: String?,
                               statusCode: Int32, statusText: String)
+
+    /// The engine could not resume video capture while re-applying
+    /// ``CallMediaIntent/transmitsVideo`` after a media change (hold/unhold/re-INVITE —
+    /// see `PJSUA.reapplyVideoTransmission`). `status` is the `pj_status_t` pjsua returned;
+    /// typical causes are the capture device unavailable (permission denied, device
+    /// locked or backgrounded, busy) or an encoder-start failure. The call itself is
+    /// unaffected. The app decides the
+    /// reaction — e.g. surface "video unavailable", or retry with
+    /// ``PJSUA/setVideoTransmission(_:enabled:)`` once the obstruction is gone.
+    ///
+    /// A direct ``PJSUA/setVideoTransmission(_:enabled:)`` call reports the same failure
+    /// by throwing instead; `SwiftPJSUAKit`'s router relays the throw from its outgoing
+    /// video-call path onto its event tap as this case, so the app observes one shape
+    /// (`-1` as `status` when the error was not a `PJSUAError`).
+    case videoTransmissionFailed(call: CallID, status: Int32)
 }
 
 /// The `pjsua_ip_change_op` step currently being reported by `.ipChangeProgress`.

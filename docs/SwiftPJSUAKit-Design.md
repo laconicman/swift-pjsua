@@ -32,6 +32,14 @@ Untouched cornerstones (decided earlier, *do not reverse casually*):
   lifecycle in Swift, improving where we can. (DeepWiki PJSUA2 lifecycle, §3/§4.)
 - **Custom `SerialExecutor` on one PJLIB thread**; the actor only ever *enters* PJSIP calls.
   `thread_cnt`/`media.thread_cnt` pinned ≥1 so pjsua's own worker threads pump events (G1).
+  This is also the structural fix for the darwin video deadlock: `darwin_stream_stop`
+  (pjmedia-videodev/darwin_dev.m) blocks on `performSelectorOnMainThread:…waitUntilDone:YES`
+  (`stopRunning`/`finish_render`) and is reached by STOP_TRANSMIT, hangup and every
+  hold/re-INVITE rebuild — since every pjsua call runs on the pinned thread and `await`
+  suspends without blocking the main run loop, the wait always completes. The only way to
+  recreate it (upstream pjproject issue #4928) is a *blocking* main-thread wait on the
+  engine — `DispatchSemaphore`, `Thread.sleep`, `DispatchQueue.main.sync` from a callback;
+  apps must never do that, and the Kit never does (CallKit delegate → `Task { await … }`).
 - **Callbacks hold no actor reference** — re-entrancy impossible by construction (G2).
 - **iOS builds PJSIP with `SETUP_AV_AUDIO_SESSION=0`** — CallKit/app owns `AVAudioSession`; the
   engine only opens/closes the sound device on CallKit's audio cues (§5).
@@ -173,7 +181,7 @@ public struct CallMediaInfo: Sendable, Equatable {
     public var direction: Direction
     public var audioConfSlot: Int32?      // pjsua conf-bridge slot, when kind == .audio
     public var videoWindow: UInt32?       // pjsua_vid_win_id, when kind == .video (incoming)
-    public var videoCapture: Bool         // this video stream is transmitting our camera
+    public var videoCapture: Bool         // this video stream is transmitting our video
 }
 
 // PJSUAEvent change:
@@ -226,16 +234,40 @@ Decisions baked in now even though pixel rendering is the app's job:
   state and the device/video bridge are driven from there, not from UI. Local camera capture may be
   restricted while locked — the app reflects that; the signaling path is unaffected.
 
-**D-VIDEO (sign-off):** shape the full video type/event/API surface now; implement engine-side
-window-id surfacing + video-conf connect; defer app-side rendering (it lives in Offhook).
+**D-VIDEO (sign-off, extended by #38):** shape the full video type/event/API surface now;
+implement engine-side window-id surfacing + video-conf connect; defer app-side rendering
+(it lives in Offhook). Extended: the send-side control surface is the *intent* model
+(`CallMediaIntent`), not pjsua's auto flags — see below.
 
 **As-built (PR-b).** `PJSUA+Video.swift`: `addVideoStream` / `removeVideoStream` /
-`startVideoTransmission` / `stopVideoTransmission` / `changeVideoCaptureDevice` / `sendVideoKeyframe`
+`setVideoTransmission` / `setVideoDirection` / `changeVideoCaptureDevice` / `sendVideoKeyframe`
 (all via `pjsua_call_set_vid_strm`, each initialised with `pjsua_call_vid_strm_op_param_default`);
 `showVideoWindow(_:_:)` (`pjsua_vid_win_set_show`) + `videoWindowInfo(_:)` (`pjsua_vid_win_get_info`)
 returning the new `VideoWindowInfo` value type; `videoConferenceSlot(of:sending:)`
 (`pjsua_call_get_vid_conf_port`) + `connectVideo` / `disconnectVideo`. `makeCall(to:from:video:)`
-offers one video stream (`opt.vid_cnt = 1`). Pixel rendering stays in Offhook.
+offers one video stream (`opt.vid_cnt = 1`); `answer(_:statusCode:acceptVideo:)` takes or
+declines the offered video m-line. Pixel rendering stays in Offhook.
+
+**As-built (media intent, #38).** pjsua rebuilds the audio *and* video streams on every
+direction change (`is_media_changed()`, pjsua_media.c — hold, unhold, remote hold, codec
+or IP-change re-INVITE), and each rebuild comes back with the mic bridge freshly wired
+and the video encoder paused (`pjsua_vid_channel_update` sets capture up only under
+`vid_out_auto_transmit`). What the user wants — mic muted, video transmitted, video refused —
+cannot live in that state, so the engine keeps it per call as `CallMediaIntent`
+(microphoneMuted / transmitsVideo / acceptsVideo), applied synchronously in the
+media-state callback. #38 itself was filed for video transmitting nothing; the intent
+model also fixes a mute-across-hold bug found while designing it: a
+muted-then-held-then-resumed call used to come back with a live mic. pjsua's
+`vid_out_auto_transmit`/`vid_in_auto_show` are not exposed as knobs — `vid_in_auto_show`
+is just pinned `PJ_TRUE` (the window is a hidden `UIView` anyway); the reasoned verdict
+on `vid_out_auto_transmit` is TD-33. The lock-screen fact that makes this safe:
+`CXCallUpdate.hasVideo = true` makes iOS require unlock before answering, so the app is
+foreground when it decides about video transmission — remaining app concerns are the permission
+prompt and the camera being revoked in background (re-apply with `setVideoTransmission` on
+foreground). LiveCommunicationKit is the same shape (`ConversationManager.Configuration.supportsVideo`,
+`StartConversationAction.isVideo`, `Conversation.Capabilities.video`, `MuteConversationAction`;
+`JoinConversationAction` has no video flag either), so the engine-side intent is
+Kit-agnostic. Migration notes: `docs/LiveCommunicationKit-Migration.md`.
 
 ---
 

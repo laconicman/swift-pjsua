@@ -22,12 +22,38 @@ extension PJSUA {
             pjsua_call_make_call(account.raw, &dst, &opt, nil, nil, &callId)
         }
         try status.throwIfFailed()
+        // The slot may be recycled: start the new call with a default intent even if a
+        // late intent write raced the previous call's teardown (see pjsuaOnCallState).
+        clearMediaIntent(for: callId)
         return CallID(callId)
     }
 
-    /// Answer an incoming call (default `PJSIP_SC_OK` / 200).
-    public func answer(_ call: CallID, statusCode: UInt32 = PJSIP_SC_OK.rawValue) throws {
-        try pjsua_call_answer(call.raw, statusCode, nil, nil).throwIfFailed()
+    /// Answer an incoming call (default `PJSIP_SC_OK` / 200). `acceptVideo` decides the
+    /// offered video m-line: `false` answers it with port 0 (`opt.vid_cnt = 0` in
+    /// `pjsua_call_answer2`) — an audio-only answer, not a rejection; `true` accepts it
+    /// receive-only until transmission is enabled (``setVideoTransmission(_:enabled:)``).
+    /// A non-nil value is also recorded as ``CallMediaIntent/acceptsVideo`` for later
+    /// remote re-offers; `nil` (the default) keeps the recorded intent — so a
+    /// ``setAcceptsVideo(_:_:)`` issued while the call rang still applies.
+    ///
+    /// `opt` is passed only for 183 and 2xx: only those carry SDP, and pjsua applies
+    /// only the FIRST call setting supplied with a code < 300 (`pjsua_call.c`,
+    /// `opt_inited`; later differing settings are ignored with a warning). A 180
+    /// therefore cannot carry the decision — it gets nil `opt` and does not touch the
+    /// intent.
+    public func answer(_ call: CallID, statusCode: UInt32 = PJSIP_SC_OK.rawValue,
+                       acceptVideo: Bool? = nil) throws {
+        guard statusCode == 183 || statusCode / 100 == 2 else {
+            try pjsua_call_answer2(call.raw, nil, statusCode, nil, nil).throwIfFailed()
+            return
+        }
+        if let acceptVideo {
+            updateMediaIntent(for: call.raw) { $0.acceptsVideo = acceptVideo }
+        }
+        var opt = pjsua_call_setting()
+        pjsua_call_setting_default(&opt)
+        opt.vid_cnt = SwiftPJSUA.mediaIntent(for: call.raw).acceptsVideo ? 1 : 0
+        try pjsua_call_answer2(call.raw, &opt, statusCode, nil, nil).throwIfFailed()
     }
 
     /// Hang up a call (default `PJSIP_SC_DECLINE` / 603). Pass
@@ -64,16 +90,41 @@ extension PJSUA {
         try pjsua_call_reinvite(call.raw, 1, nil).throwIfFailed()
     }
 
-    /// Mute or unmute the local microphone for a call by (dis)connecting the capture device
-    /// (conference slot 0) and the call's conference port (`pjsua_call_get_conf_port`). This
-    /// is a purely local conference re-wiring — no SIP signalling — so it is instantaneous
-    /// and a `CXSetMutedCallAction` can be fulfilled immediately. Remote audio keeps playing
-    /// while muted (we only drop the capture -> call direction).
+    /// Mute or unmute the local microphone for a call. Recorded as
+    /// ``CallMediaIntent/microphoneMuted`` **first**, then applied to the live bridge by
+    /// (dis)connecting the capture device (conference slot 0) and the call's conference
+    /// port (`pjsua_call_get_conf_port`). This is a purely local conference re-wiring —
+    /// no SIP signalling — so it is instantaneous and a `CXSetMutedCallAction` can be
+    /// fulfilled immediately. Remote audio keeps playing while muted (we only drop the
+    /// capture -> call direction).
+    ///
+    /// Because it is recorded intent, muting before media exists or while the call is
+    /// held is not an error: the media-state callback re-applies it synchronously on
+    /// every stream rebuild, so a call muted at any point never comes up with a live
+    /// mic (see `pjsuaOnCallMediaState`). No conference port yet means there is nothing
+    /// to re-wire now — the intent still stands, and this no longer throws.
     public func setMute(_ call: CallID, muted: Bool) throws {
+        updateMediaIntent(for: call.raw) { $0.microphoneMuted = muted }
         let port = pjsua_call_get_conf_port(call.raw)
-        guard port >= 0 else { throw PJSUAUsageError.callHasNoMediaPort(call) } // PJSUA_INVALID_ID == -1
+        guard port >= 0 else { return } // PJSUA_INVALID_ID == -1 — intent recorded
         let status = muted ? pjsua_conf_disconnect(0, port) : pjsua_conf_connect(0, port)
         try status.throwIfFailed()
+    }
+
+    /// The call's recorded ``CallMediaIntent`` — what the user wants from its media,
+    /// independent of what SDP currently says (defaults when nothing was ever set).
+    /// See ``CallMediaIntent`` for why this lives outside pjsua's media status.
+    public func mediaIntent(for call: CallID) -> CallMediaIntent {
+        SwiftPJSUA.mediaIntent(for: call.raw)
+    }
+
+    /// Accept or decline the video m-line of the remote's *next* offer (re-INVITE or
+    /// UPDATE). Recorded as ``CallMediaIntent/acceptsVideo``; takes effect when the
+    /// offer arrives — the engine's `on_call_rx_offer` answers the line with port 0
+    /// while leaving `code` at 200, so audio continues. Nothing is signalled now; for
+    /// an immediate local downgrade use ``removeVideoStream(from:streamIndex:)``.
+    public func setAcceptsVideo(_ call: CallID, _ accepts: Bool) {
+        updateMediaIntent(for: call.raw) { $0.acceptsVideo = accepts }
     }
 
     /// Send DTMF `digits` for the call. Uses `pjsua_call_dial_dtmf2`, i.e. in-band RFC 2833

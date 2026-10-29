@@ -32,7 +32,7 @@ import PJSIP
 //                            on_rejected_incoming_call
 //   no PJSUA_LOCK, but the dialog/tsx grp_lock is held upstream:
 //                            on_call_state, on_call_tsx_terminate_session, on_mwi_state,
-//                            on_auth_challenge
+//                            on_auth_challenge, on_call_rx_offer
 //   depends on the path    : on_transport_state — no lock for a socket error, the transport
 //                            manager's and the transport's for a shutdown, PJSUA_LOCK too
 //                            inside an IP change; on the worker or the sending thread
@@ -60,6 +60,12 @@ private nonisolated(unsafe) var pjsuaEventSink: AsyncStream<PJSUAEvent>.Continua
 private nonisolated(unsafe) var pjsuaCallEventSink: AsyncStream<PJSUAEvent>.Continuation?
 /// The engine's own registration channel (``RegistrationSignal``); same invariant as above.
 private nonisolated(unsafe) var pjsuaRegistrationSink: AsyncStream<RegistrationSignal>.Continuation?
+/// The engine's own video-transmission channel; same invariant as above. The media-state
+/// callback yields a ``CallID`` here when a rebuilt video stream needs its
+/// ``CallMediaIntent/transmitsVideo`` re-applied — the *application* of it
+/// (`pjsua_call_set_vid_strm`, which opens an `AVCaptureSession`) must not run on the
+/// worker thread inside the callback, so the actor's consumer task does it.
+private nonisolated(unsafe) var pjsuaVideoTransmissionSink: AsyncStream<CallID>.Continuation?
 /// The engine's executor thread, recorded by ``installPJSUACallbacks(into:)``, which
 /// `PJSUA.start` runs there. Same invariant: written before `pjsua_init`, read-only thereafter.
 private nonisolated(unsafe) var pjsuaEngineThread: pthread_t?
@@ -130,22 +136,28 @@ func pjsuaOnLog(_ level: Int32, _ data: UnsafePointer<CChar>?, _ len: Int32) {
 ///   unconsumed buffer grows only with real call activity — an idle engine produces
 ///   none, unlike the periodic renewals a single unbounded stream would have retained.
 ///
-/// The third, `registrationSignals`, is the engine's own and never reaches the app. It is
-/// unbounded because nothing may drop from it: the engine sequences account registrations on
-/// these signals. A task on the engine actor reads it for the engine's whole life, so it does
-/// not accumulate.
+/// The third and fourth are the engine's own and never reach the app:
+/// `registrationSignals` is unbounded because nothing may drop from it — the engine
+/// sequences account registrations on these signals; `videoTransmissionSignals` carries the
+/// "a rebuilt video stream wants video transmission re-applied" notices from
+/// `on_call_media_state` (see ``pjsuaOnCallMediaState``). A task on the engine actor
+/// reads each for the engine's whole life, so neither accumulates.
 func makePJSUAEventStreams() -> (events: AsyncStream<PJSUAEvent>,
                                 callEvents: AsyncStream<PJSUAEvent>,
-                                registrationSignals: AsyncStream<RegistrationSignal>) {
+                                registrationSignals: AsyncStream<RegistrationSignal>,
+                                videoTransmissionSignals: AsyncStream<CallID>) {
     let (events, eventsContinuation) = AsyncStream<PJSUAEvent>.makeStream(
         bufferingPolicy: .bufferingNewest(64))
     let (callEvents, callContinuation) = AsyncStream<PJSUAEvent>.makeStream()
     let (registrationSignals, registrationContinuation) =
         AsyncStream<RegistrationSignal>.makeStream()
+    let (videoTransmissionSignals, videoTransmissionContinuation) =
+        AsyncStream<CallID>.makeStream()
     pjsuaEventSink = eventsContinuation
     pjsuaCallEventSink = callContinuation
     pjsuaRegistrationSink = registrationContinuation
-    return (events, callEvents, registrationSignals)
+    pjsuaVideoTransmissionSink = videoTransmissionContinuation
+    return (events, callEvents, registrationSignals, videoTransmissionSignals)
 }
 
 /// Finish the event streams (called from `PJSUA.shutdown`). Also resets the registration
@@ -155,12 +167,16 @@ func finishPJSUAEventStreams() {
     pjsuaEventSink?.finish()
     pjsuaCallEventSink?.finish()
     pjsuaRegistrationSink?.finish()
+    pjsuaVideoTransmissionSink?.finish()
     regDedupLock.lock()
     lastEmittedRegState.removeAll()
     regDedupLock.unlock()
     registrationTransportLock.lock()
     registrationTransports.removeAll()
     registrationTransportLock.unlock()
+    mediaIntentLock.lock()
+    mediaIntents.removeAll()
+    mediaIntentLock.unlock()
 }
 
 /// Telemetry yield: the bounded `events` stream only.
@@ -171,6 +187,13 @@ private func emit(_ event: PJSUAEvent) {
 /// Call-scoped yield: the guaranteed `callEvents` channel plus the `events` copy, so
 /// the complete record stays complete for consumers that want it.
 private func emitCall(_ event: PJSUAEvent) {
+    emitCallEvent(event)
+}
+
+/// The guaranteed-channel yield for events produced by the *actor* itself rather than a
+/// worker-thread callback (e.g. `.videoTransmissionFailed` — the engine's own report of a
+/// failed video-transmission re-apply). Same delivery contract as `emitCall`.
+func emitCallEvent(_ event: PJSUAEvent) {
     pjsuaCallEventSink?.yield(event)
     pjsuaEventSink?.yield(event)
 }
@@ -183,6 +206,9 @@ func installPJSUACallbacks(into cfg: inout pjsua_config) {
     cfg.cb.on_call_state       = { callId, ev    in pjsuaOnCallState(callId, ev) }
     cfg.cb.on_incoming_call    = { acc, callId, rx in pjsuaOnIncomingCall(acc, callId, rx) }
     cfg.cb.on_call_media_state = { callId        in pjsuaOnCallMediaState(callId) }
+    cfg.cb.on_call_rx_offer    = { callId, offer, reserved, code, opt in
+        pjsuaOnCallRxOffer(callId, offer, reserved, code, opt)
+    }
     cfg.cb.on_reg_state2       = { acc, info     in pjsuaOnRegState2(acc, info) }
     cfg.cb.on_reg_started2     = { acc, info     in pjsuaOnRegStarted2(acc, info) }
     cfg.cb.on_stream_destroyed = { callId, strm, idx in pjsuaOnStreamDestroyed(callId, strm, idx) }
@@ -216,6 +242,11 @@ private func pjsuaOnCallState(_ callId: pjsua_call_id, _ event: UnsafeMutablePoi
     assertOnRegisteredPJThread()
     var info = pjsua_call_info()
     guard pjsua_call_get_info(callId, &info).isSuccess else { return }
+    // pjsua recycles call ids: drop the media intent so a recycled id starts clean
+    // rather than inheriting e.g. a muted mic from the previous call on this slot.
+    if info.state == PJSIP_INV_STATE_DISCONNECTED {
+        clearMediaIntent(for: callId)
+    }
     emitCall(.callState(
         call: CallID(callId),
         state: CallState(info.state),
@@ -228,6 +259,9 @@ private func pjsuaOnIncomingCall(_ accId: pjsua_acc_id,
                                  _ callId: pjsua_call_id,
                                  _ rdata: UnsafeMutablePointer<pjsip_rx_data>?) {
     assertOnRegisteredPJThread()
+    // Belt-and-braces alongside the `.disconnected` clear: a recycled id must start with
+    // a default intent even if a late intent write raced the previous call's teardown.
+    clearMediaIntent(for: callId)
     // Surface the SIP Call-ID so the GUI layer can compute a stable CallKit UUID (dedup
     // a VoIP push against the INVITE that follows it over a persisted connection), the
     // remote display info for the CallKit handle, and whether the offer carried video.
@@ -261,13 +295,23 @@ private func pjsuaOnCallMediaState(_ callId: pjsua_call_id) {
     // (`pjsua_vid_conf_*`) lands in a later iteration; here we only surface the video info.
     // This low-level wiring is the engine's job; the higher-level reaction is the app's
     // (see `PJSUAEvent.callMediaState`).
+    let intent = mediaIntent(for: callId)
     let media = callMediaInfos(from: &info)
     for stream in media where stream.kind == .audio {
         guard let slot = stream.audioConfSlot else { continue }
         switch stream.status {
         case .active, .remoteHold:
             pjsua_conf_connect(slot, 0)
-            pjsua_conf_connect(0, slot)
+            // The mute decision must be made HERE, synchronously, not relayed to the
+            // actor: a hold/unhold or re-INVITE rebuilds the stream (pjsua_media.c
+            // `is_media_changed()` — any direction change reallocates the conf slot),
+            // and a re-mute arriving one actor turn later would leave a window with the
+            // mic live on what the user believes is a muted call. Fail closed.
+            if intent.microphoneMuted {
+                pjsua_conf_disconnect(0, slot)
+            } else {
+                pjsua_conf_connect(0, slot)
+            }
         default:
             break
         }
@@ -275,12 +319,59 @@ private func pjsuaOnCallMediaState(_ callId: pjsua_call_id) {
     // Surface the full per-stream vector; the engine does not filter — the app/router
     // decides which streams/states matter (see `PJSUAEvent.callMediaState`).
     emitCall(.callMediaState(call: CallID(callId), media: media))
+
+    // The video stream was just rebuilt and `pjsua_vid_channel_update()` started it
+    // paused in the encoding direction (capture is set up only when pjsua's
+    // `vid_out_auto_transmit` account flag is on, which the engine deliberately leaves
+    // off — see `CallMediaIntent`). Re-applying the video-transmission intent means
+    // `PJSUA_CALL_VID_STRM_START_TRANSMIT`, which opens the capture device — far too slow for a
+    // callback running under the dialog lock. Defer it to the actor through the
+    // engine's own channel — which re-emits `.callMediaState` once capture is back, since
+    // the snapshot above still shows the stream paused. A sendonly (`.encoding`) video
+    // stream reports `.localHold`, so `.localHold` with an encoding direction counts too — unless the
+    // hold is OURS: a local hold produces the same sendonly/`.localHold` shape, and
+    // pjsua guards it with `!call->local_hold` (not exposed on `pjsua_call_info`), so
+    // the audio stream's `.localHold` status stands in as the proxy for it.
+    let onLocalHold = media.contains { $0.kind == .audio && $0.status == .localHold }
+    if intent.transmitsVideo, !onLocalHold,
+       media.contains(where: {
+           $0.kind == .video
+               && ($0.status == .active || $0.status == .localHold)
+               && ($0.direction == .encoding || $0.direction == .encodingDecoding)
+       }) {
+        pjsuaVideoTransmissionSink?.yield(CallID(callId))
+    }
+}
+
+/// `on_call_rx_offer` — the remote re-INVITEd/UPDATEd with a new SDP offer (or answered a
+/// codec-less initial INVITE). Runs with the dialog lock held upstream (the same context
+/// as `on_call_state`), so it reads plain data only: the call's recorded
+/// ``CallMediaIntent``, never anything that takes another lock.
+///
+/// Without this callback pjsua answers the offer with the *current* `call->opt`, which
+/// keeps whatever `vid_cnt` the call was answered/made with — so BOTH directions need
+/// asserting here: a call answered audio-only (`vid_cnt == 0`) that later accepts video
+/// would still decline the line, and one that declines gets `vid_cnt = 0` — port 0,
+/// not a 488, so audio continues. `code` is left at 200.
+private func pjsuaOnCallRxOffer(_ callId: pjsua_call_id,
+                                _ offer: UnsafePointer<pjmedia_sdp_session>?,
+                                _ reserved: UnsafeMutableRawPointer?,
+                                _ code: UnsafeMutablePointer<pjsip_status_code>?,
+                                _ opt: UnsafeMutablePointer<pjsua_call_setting>?) {
+    assertOnRegisteredPJThread()
+    guard let opt else { return }
+    if mediaIntent(for: callId).acceptsVideo {
+        if opt.pointee.vid_cnt == 0 { opt.pointee.vid_cnt = 1 }
+    } else {
+        opt.pointee.vid_cnt = 0
+    }
 }
 
 /// Build the per-stream media vector from a call's `media[]` C array (a fixed-size tuple in
-/// Swift), bounded by `media_cnt`. POD reads only — safe on the worker thread. Rebinding the
+/// Swift), bounded by `media_cnt`. POD reads only — safe on the worker thread, and also used
+/// by the actor for its own `pjsua_call_get_info` reads (`PJSUA+Video.swift`). Rebinding the
 /// tuple's storage to its element type is valid because a C array is contiguous.
-private func callMediaInfos(from info: inout pjsua_call_info) -> [CallMediaInfo] {
+func callMediaInfos(from info: inout pjsua_call_info) -> [CallMediaInfo] {
     let count = Int(info.media_cnt)
     guard count > 0 else { return [] }
     return withUnsafePointer(to: &info.media) { tuplePtr in
@@ -288,6 +379,46 @@ private func callMediaInfos(from info: inout pjsua_call_info) -> [CallMediaInfo]
             (0..<count).map { CallMediaInfo(base[$0]) }
         }
     }
+}
+
+// MARK: - Per-call media intent (shared with the actor)
+
+/// The per-call ``CallMediaIntent`` table, written by the actor (setMute /
+/// setVideoTransmission / answer / setAcceptsVideo / setVideoDirection / addVideoStream)
+/// and read by the worker-thread callbacks (`pjsuaOnCallMediaState`,
+/// `pjsuaOnCallRxOffer`) that apply it synchronously. Guarded by `mediaIntentLock` —
+/// the callbacks run on different PJSUA threads and under the dialog lock, so the lock
+/// must be a leaf: nothing is called while it is held. An entry lives until the call
+/// reports `.disconnected` (`pjsuaOnCallState`) — pjsua recycles call ids — or
+/// ``finishPJSUAEventStreams()`` at engine shutdown.
+private let mediaIntentLock = NSLock()
+private nonisolated(unsafe) var mediaIntents: [pjsua_call_id: CallMediaIntent] = [:]
+
+/// The call's recorded intent, or the default (mic live, video transmission off, video accepted)
+/// when none was ever set — an unset call behaves exactly as the pre-intent engine did.
+func mediaIntent(for callId: pjsua_call_id) -> CallMediaIntent {
+    mediaIntentLock.lock()
+    defer { mediaIntentLock.unlock() }
+    return mediaIntents[callId] ?? CallMediaIntent()
+}
+
+/// Record one intent field for `callId`, creating the entry from defaults on first write.
+func updateMediaIntent(for callId: pjsua_call_id,
+                       _ mutate: (inout CallMediaIntent) -> Void) {
+    mediaIntentLock.lock()
+    var intent = mediaIntents[callId] ?? CallMediaIntent()
+    mutate(&intent)
+    mediaIntents[callId] = intent
+    mediaIntentLock.unlock()
+}
+
+/// Drop `callId`'s entry: a default-equivalent state and the mark that a recycled id
+/// starts clean. Called from `pjsuaOnCallState` on `.disconnected` and available to the
+/// actor for tests.
+func clearMediaIntent(for callId: pjsua_call_id) {
+    mediaIntentLock.lock()
+    mediaIntents[callId] = nil
+    mediaIntentLock.unlock()
 }
 
 /// The stream is about to be destroyed — this is the **only** point at which its final counters

@@ -42,6 +42,13 @@ public actor PJSUA {
     /// read by a task on this actor from ``start(_:)`` on. See `PJSUA+RegistrationLifecycle.swift`.
     nonisolated let registrationSignals: AsyncStream<RegistrationSignal>
 
+    /// The engine's own video-transmission channel: `on_call_media_state` yields a call here
+    /// when a rebuilt video stream needs ``CallMediaIntent/transmitsVideo`` re-applied —
+    /// applying it means `pjsua_call_set_vid_strm` (opens an `AVCaptureSession`), far too
+    /// slow for the callback's dialog-lock context. Read by a task on this actor from
+    /// ``start(_:)`` on, like ``registrationSignals``.
+    nonisolated let videoTransmissionSignals: AsyncStream<CallID>
+
     /// Registration bookkeeping, kept from this actor's own calls and from `registrationSignals`.
     var registration = RegistrationLifecycle()
 
@@ -163,6 +170,7 @@ public actor PJSUA {
         self.events = streams.events
         self.callEvents = streams.callEvents
         self.registrationSignals = streams.registrationSignals
+        self.videoTransmissionSignals = streams.videoTransmissionSignals
         self.executor = PJSIPExecutor()
     }
 
@@ -313,6 +321,65 @@ public actor PJSUA {
             for await signal in registrationSignals {
                 await self?.applyRegistrationSignal(signal)
             }
+        }
+
+        // Same lifetime for the video-transmission signals: `pjsuaOnCallMediaState` defers the
+        // expensive `START_TRANSMIT` here so it runs on the engine thread, off the dialog lock.
+        Task { [weak self, videoTransmissionSignals] in
+            for await call in videoTransmissionSignals {
+                await self?.reapplyVideoTransmission(call)
+            }
+        }
+    }
+
+    /// Re-apply the transmission half of ``CallMediaIntent`` after a video-stream rebuild
+    /// (hold/unhold/re-INVITE) — the second half of the signal path that starts in
+    /// `pjsuaOnCallMediaState`. The intent is re-read rather than carried on the signal:
+    /// it may have changed while the notice was in flight (the user disabled transmission
+    /// between the rebuild and this turn), and the current value is the honest one.
+    /// `call_set_tx_video` (pjsua_vid.c) sets capture up itself when the rebuild released
+    /// it (`cap_win_id == PJSUA_INVALID_ID`) and resumes the stream's encoding leg.
+    ///
+    /// Call-wide like ``setVideoTransmission(_:enabled:)`` — every negotiated video
+    /// stream with an encoding direction gets START_TRANSMIT. A failure reaches the app
+    /// as `.videoTransmissionFailed` on the guaranteed channel, once per failing stream —
+    /// the capture device unavailable (permission, locked/backgrounded, busy), or encoder
+    /// start; the app reacts (e.g. shows "video unavailable", or retries with
+    /// ``setVideoTransmission(_:enabled:)``).
+    ///
+    /// The `.callMediaState` snapshot the callback emitted predates this turn, so it
+    /// showed the stream as the rebuild left it (`videoCapture == false`). Once at least
+    /// one stream resumed, a fresh snapshot is emitted so the applied state is observable
+    /// rather than inferred.
+    private func reapplyVideoTransmission(_ call: CallID) {
+        guard SwiftPJSUA.mediaIntent(for: call.raw).transmitsVideo else { return }
+        var info = pjsua_call_info()
+        guard pjsua_call_get_info(call.raw, &info).isSuccess else { return }
+        let media = callMediaInfos(from: &info)
+        // The signal may have been queued before a local hold arrived: the audio
+        // stream's `.localHold` status is the same proxy the callback uses for
+        // pjsua's `!call->local_hold` guard — never restart transmission while held.
+        if media.contains(where: { $0.kind == .audio && $0.status == .localHold }) {
+            return
+        }
+        var resumed = false
+        for stream in media
+        where stream.kind == .video
+            && (stream.status == .active || stream.status == .localHold)
+            && (stream.direction == .encoding || stream.direction == .encodingDecoding) {
+            var param = pjsua_call_vid_strm_op_param()
+            pjsua_call_vid_strm_op_param_default(&param)
+            param.med_idx = Int32(stream.index)
+            let status = pjsua_call_set_vid_strm(call.raw,
+                                               PJSUA_CALL_VID_STRM_START_TRANSMIT, &param)
+            if status.isSuccess {
+                resumed = true
+            } else {
+                emitCallEvent(.videoTransmissionFailed(call: call, status: Int32(status)))
+            }
+        }
+        if resumed, pjsua_call_get_info(call.raw, &info).isSuccess {
+            emitCallEvent(.callMediaState(call: call, media: callMediaInfos(from: &info)))
         }
     }
 

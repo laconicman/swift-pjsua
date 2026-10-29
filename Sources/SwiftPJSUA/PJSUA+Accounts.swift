@@ -314,6 +314,15 @@ extension PJSUA {
         var acc = pjsua_acc_config()
         pjsua_acc_config_default(&acc)
 
+        // Show an incoming-video window by default: it is just a UIView the app embeds,
+        // and hidden-by-default would trap every app into needing `showVideoWindow`
+        // before anything renders. (Hiding stays available through `showVideoWindow`.)
+        acc.vid_in_auto_show = true.pjBool
+        // `vid_out_auto_transmit` is deliberately left PJ_FALSE (the pjsua default) and
+        // not exposed: the standing "send my video" decision is CallMediaIntent's
+        // transmitsVideo, re-applied after every media rebuild — a one-shot auto flag
+        // cannot express that (see CallMediaIntent.swift, TD-33).
+
         let idOwner = PJString(config.id)
         let regOwner = PJString(config.registrar)
 

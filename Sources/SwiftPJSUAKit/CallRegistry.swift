@@ -25,14 +25,19 @@ public actor CallRegistry {
         /// When the entry was first created. Used only to evict orphaned *pending* entries; not
         /// refreshed when later identifiers are merged.
         public var createdAt: Date
+        /// Whether this call carries video — from `reportIncomingCall`'s `hasVideo` on the
+        /// incoming path, `CXStartCallAction.isVideo` on the outgoing path. Read at answer
+        /// time to configure the audio session (videoChat vs voiceChat mode).
+        public var hasVideo: Bool
 
         public init(uuid: UUID, sipCallID: String? = nil, call: CallID? = nil,
-                    reported: Bool = false, createdAt: Date = Date()) {
+                    reported: Bool = false, createdAt: Date = Date(), hasVideo: Bool = false) {
             self.uuid = uuid
             self.sipCallID = sipCallID
             self.call = call
             self.reported = reported
             self.createdAt = createdAt
+            self.hasVideo = hasVideo
         }
     }
 
@@ -52,19 +57,25 @@ public actor CallRegistry {
         self.now = now
     }
 
-    /// Record the call for `uuid`, merging any newly-learned identifiers.
+    /// Record the call for `uuid`, merging any newly-learned identifiers. `hasVideo`
+    /// OR-merges on later sightings — a VoIP push that arrived without SDP knowledge
+    /// records `false`, and the INVITE that arrives later with video knowledge upgrades
+    /// it; a report that does not know never downgrades one that did.
     ///
     /// - Returns: `true` the first time a `uuid` is seen (the caller should report a new
     ///   incoming call to CallKit); `false` on subsequent arrivals (already reported).
     @discardableResult
-    public func firstSeen(uuid: UUID, sipCallID: String? = nil, call: CallID? = nil) -> Bool {
+    public func firstSeen(uuid: UUID, sipCallID: String? = nil, call: CallID? = nil,
+                          hasVideo: Bool = false) -> Bool {
         if var existing = entries[uuid] {
             if existing.sipCallID == nil { existing.sipCallID = sipCallID }
             if existing.call == nil { existing.call = call }
+            if hasVideo { existing.hasVideo = true }
             entries[uuid] = existing
             return false
         }
-        entries[uuid] = Entry(uuid: uuid, sipCallID: sipCallID, call: call, createdAt: now())
+        entries[uuid] = Entry(uuid: uuid, sipCallID: sipCallID, call: call,
+                              createdAt: now(), hasVideo: hasVideo)
         return true
     }
 

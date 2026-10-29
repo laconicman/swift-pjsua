@@ -439,11 +439,32 @@ payload contract (the VoIP one is Flexisip's, TD-2). **PR-b** added the video su
   calls, call transfer, early media. Expand the `PJSUA` actor surface accordingly.
 - **Video & conferences — delivered in PR-b** (design doc §6/§7 "As-built"):
   - **Video (D-VIDEO).** Engine wrappers in `PJSUA+Video.swift` — `addVideoStream` /
-    `removeVideoStream` / `startVideoTransmission` / `stopVideoTransmission` /
+    `removeVideoStream` / `setVideoTransmission` / `setVideoDirection` /
     `changeVideoCaptureDevice` / `sendVideoKeyframe` (all `pjsua_call_set_vid_strm`),
     `showVideoWindow` / `videoWindowInfo` (→ `VideoWindowInfo`), `videoConferenceSlot(of:sending:)`
-    + `connectVideo` / `disconnectVideo`; `makeCall(to:from:video:)` offers a video stream;
-    `CXStartCallAction.isVideo` is mapped through. Pixel rendering lives in the Offhook app.
+    + `connectVideo` / `disconnectVideo`; `makeCall(to:from:video:)` offers a video stream,
+    `answer(_:statusCode:acceptVideo:)` declines or keeps the recorded video intent;
+    `CXStartCallAction.isVideo` is mapped
+    through. Per-call media intent (`CallMediaIntent`, #38) keeps mic/video-transmission/video-acceptance
+    across pjsua's media rebuilds. Pixel rendering lives in the Offhook app.
+    Preview (`pjsua_vid_preview_start/stop`) is not exposed and is independent of
+    transmission — STOP_TRANSMIT releases the capture window only if no preview holds
+    it (`call_set_tx_video`, pjsua_vid.c).
+
+    **pjsua answer / call-setting gotchas** (verified against pjproject):
+    - `pjsua_call_answer2` applies only the FIRST non-NULL `opt` passed with a
+      code < 300 and sets `call->opt_inited`; later differing opts are ignored with a
+      level-2 log "The call setting changes is ignored" (pjsua_call.c). Hence
+      `answer(_:statusCode:acceptVideo:)` passes `opt` only for 183/2xx — a 180 cannot
+      carry the video decision.
+    - For an incoming INVITE with SDP the media channel is initialised at
+      `on_incoming_call` time with the default `vid_cnt = 1`
+      (`pjsua_call_setting_default`), and `apply_call_setting` does not re-init it in
+      INCOMING/EARLY. `vid_cnt = 0` still works because `pjsua_media_channel_update`
+      deactivates (port 0) negotiated media exceeding `opt.*_cnt` and re-negotiates the
+      answer before the 200 — the same path makes `on_call_rx_offer`'s `vid_cnt`
+      effective on re-INVITE/UPDATE (`pjsua_call_on_rx_offer` →
+      `apply_call_setting(call, &opt, offer)`).
   - **Conferences (D-CONF).** Engine primitives in `PJSUA+Conference.swift` —
     `connectAudio(_:and:)` / `disconnectAudio(_:and:)` cross-connect call legs on the PJMEDIA
     bridge (local mixing), and `isConferenceFocus(_:)` detects the `;isfocus` `Contact` param

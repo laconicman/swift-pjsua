@@ -333,21 +333,32 @@ public actor CallSessionRouter {
             action.fail()
             return
         }
+        let call: CallID
         do {
-            let call = try await engine.makeCall(to: action.handle.value, from: account, video: action.isVideo)
-            await bind(call: call, to: action.callUUID, hasVideo: action.isVideo)
-            // An outgoing video call is the one place the system control expresses
-            // "send video" (`CXStartCallAction.isVideo`), so record the video-transmission intent:
-            // the engine re-applies it after every media rebuild. For answers neither
-            // CallKit nor LiveCommunicationKit carries a video flag — transmission on an
-            // incoming call is the app's decision (`PJSUA.setVideoTransmission`).
-            if action.isVideo {
-                try await engine.setVideoTransmission(call, enabled: true)
-            }
-            pending[action.callUUID] = .connect(action)
-            // Outbound dialing has begun; connecting/connected are reported on .early/.confirmed.
+            call = try await engine.makeCall(to: action.handle.value, from: account, video: action.isVideo)
         } catch {
             action.fail()
+            return
+        }
+        await bind(call: call, to: action.callUUID, hasVideo: action.isVideo)
+        pending[action.callUUID] = .connect(action)
+        // Outbound dialing has begun; connecting/connected are reported on .early/.confirmed.
+        guard action.isVideo else { return }
+        // An outgoing video call is the one place the system control expresses
+        // "send video" (`CXStartCallAction.isVideo`), so record the video-transmission intent:
+        // the engine re-applies it after every media rebuild. For answers neither
+        // CallKit nor LiveCommunicationKit carries a video flag — transmission on an
+        // incoming call is the app's decision (`PJSUA.setVideoTransmission`).
+        do {
+            try await engine.setVideoTransmission(call, enabled: true)
+        } catch {
+            // The INVITE is out and the call is bound to CallKit's UUID; failing the action
+            // here would strand a live SIP call outside CallKit. A capture failure (camera
+            // denied or busy, early video whose capture would not start) is a video problem,
+            // not a call failure — the intent was recorded before the attempt, so the engine
+            // retries it on the next `on_call_media_state` (the answer's own included) and
+            // a failure that persists reaches the app as `.videoTransmissionFailed`.
+            Self.logger.error("\(action.callUUID, privacy: .public): video transmission did not start: \(error, privacy: .public)")
         }
     }
 

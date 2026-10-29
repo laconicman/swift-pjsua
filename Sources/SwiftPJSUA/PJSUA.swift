@@ -346,6 +346,11 @@ public actor PJSUA {
     /// the capture device unavailable (permission, locked/backgrounded, busy), or encoder
     /// start; the app reacts (e.g. shows "video unavailable", or retries with
     /// ``setVideoTransmission(_:enabled:)``).
+    ///
+    /// The `.callMediaState` snapshot the callback emitted predates this turn, so it
+    /// showed the stream as the rebuild left it (`videoCapture == false`). Once at least
+    /// one stream resumed, a fresh snapshot is emitted so the applied state is observable
+    /// rather than inferred.
     private func reapplyVideoTransmission(_ call: CallID) {
         guard SwiftPJSUA.mediaIntent(for: call.raw).transmitsVideo else { return }
         var info = pjsua_call_info()
@@ -357,6 +362,7 @@ public actor PJSUA {
         if media.contains(where: { $0.kind == .audio && $0.status == .localHold }) {
             return
         }
+        var resumed = false
         for stream in media
         where stream.kind == .video
             && (stream.status == .active || stream.status == .localHold)
@@ -366,9 +372,14 @@ public actor PJSUA {
             param.med_idx = Int32(stream.index)
             let status = pjsua_call_set_vid_strm(call.raw,
                                                PJSUA_CALL_VID_STRM_START_TRANSMIT, &param)
-            if !status.isSuccess {
+            if status.isSuccess {
+                resumed = true
+            } else {
                 emitCallEvent(.videoTransmissionFailed(call: call, status: Int32(status)))
             }
+        }
+        if resumed, pjsua_call_get_info(call.raw, &info).isSuccess {
+            emitCallEvent(.callMediaState(call: call, media: callMediaInfos(from: &info)))
         }
     }
 

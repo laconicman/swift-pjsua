@@ -33,6 +33,12 @@ public enum PJSUAEvent: Sendable {
     /// and lets it react per stream (audio → conference slot, video → window). The engine
     /// still performs the low-level audio conference-bridge wiring itself; see
     /// `pjsuaOnCallMediaState`.
+    ///
+    /// Also emitted once more after the engine re-applies ``CallMediaIntent/transmitsVideo``
+    /// following a rebuild (`PJSUA.reapplyVideoTransmission`): the callback's snapshot shows
+    /// the video stream as pjsua left it — paused, `videoCapture == false` — and the
+    /// follow-up carries the resumed capture, so `videoCapture` is observable rather than
+    /// inferred from the intent.
     case callMediaState(call: CallID, media: [CallMediaInfo])
 
     /// A media stream was torn down, carrying the **final** statistics for it — read inside the

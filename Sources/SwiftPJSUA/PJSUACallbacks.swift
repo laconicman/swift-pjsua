@@ -326,8 +326,9 @@ private func pjsuaOnCallMediaState(_ callId: pjsua_call_id) {
     // off — see `CallMediaIntent`). Re-applying the video-transmission intent means
     // `PJSUA_CALL_VID_STRM_START_TRANSMIT`, which opens the capture device — far too slow for a
     // callback running under the dialog lock. Defer it to the actor through the
-    // engine's own channel. A sendonly (`.encoding`) video stream reports
-    // `.localHold`, so `.localHold` with an encoding direction counts too — unless the
+    // engine's own channel — which re-emits `.callMediaState` once capture is back, since
+    // the snapshot above still shows the stream paused. A sendonly (`.encoding`) video
+    // stream reports `.localHold`, so `.localHold` with an encoding direction counts too — unless the
     // hold is OURS: a local hold produces the same sendonly/`.localHold` shape, and
     // pjsua guards it with `!call->local_hold` (not exposed on `pjsua_call_info`), so
     // the audio stream's `.localHold` status stands in as the proxy for it.

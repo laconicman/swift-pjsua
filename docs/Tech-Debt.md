@@ -829,3 +829,43 @@ lifted before Phase 2's per-account transport policy:
   surface "TCP unavailable" as state). Decide when the transport surface is generalised.
 - Refs: PR #7 Devin review (#2); RFC 3261 §18 (transports); IANA SIP ports (5060 UDP/TCP, 5061
   TLS); ties to Phase 2 per-account transport policy and TD-16.
+
+## TD-34 — the TLS version range is whatever pjsua defaults to · open
+
+`TransportConfiguration` is `name`/`kind`/`port` only, so `pjsua_transport_config`'s
+`tls_setting` never reaches the API. `start()` calls `pjsua_transport_config_default()`,
+which runs `pjsip_tls_setting_default()` and leaves `proto` at `PJSIP_SSL_DEFAULT_PROTO`:
+TLS 1.0, 1.1 and 1.2 (`sip_transport_tls.h`). The Apple backend turns that mask into
+`min = TLS 1.0, max = TLS 1.2`. Two consequences today:
+
+- **TLS 1.3 is never offered.** The backend's own default (TLS 1.2 + 1.3) only applies to
+  `PJ_SSL_SOCK_PROTO_DEFAULT`, which pjsip's TLS transport does not pass on this path.
+- **The floor cannot be raised.** An app that wants "TLS 1.2 or newer, nothing older"
+  cannot say so; the minimum handed to the OS is TLS 1.0.
+
+And one for the day TLS 1.3 is switched on: from iOS 26 the platform adds a hybrid
+post-quantum key share to every TLS 1.3 ClientHello, which makes it about 1.5 KB — more
+than one TCP segment on any ordinary path. `swift-pjsip/docs/Apple-TLS-Backends.md`
+("ClientHello size and the post-quantum key share") has the mechanics and the receiver-side
+defects this is known to hit. It is not an exposure of this engine as long as the range
+ends at TLS 1.2.
+
+- **Discharge.** A set of TLS versions on `TransportConfiguration` mapped to
+  `tls_setting.proto` (a bit mask, so a set rather than a range); the default chosen
+  deliberately (TLS 1.2 + 1.3, or 1.2 only) rather than inherited. It has to decode with
+  `decodeIfPresent` like `port`, so stored configurations keep loading, and a value on a
+  non-TLS transport should be refused, not ignored. Sequence it with the rest of
+  `tls_setting` (certificates, verification), which is equally unreachable today.
+- **Not planned: an automatic fallback from TLS 1.3 to 1.2 when a handshake fails.** On this
+  backend every failure before the server certificate — refused or unreachable TCP, a
+  connection that passes no data, a lost hello — is reported as the same handshake timeout
+  (see the same document, "Failures before the certificate all look like a handshake
+  timeout"). `TransportStateChange` can rule a certificate problem in (`tlsVerifyStatus`),
+  but for anything earlier it has only that timeout, so the engine cannot tell a version
+  problem from a transient one. A plain retry
+  of the same hello usually succeeds after a transient stall, and a fallback would credit
+  the lower version for it and then keep it. Version fallback is also a downgrade path on
+  its own (RFC 7507, "TLS Fallback Signaling Cipher Suite Value (SCSV) for Preventing
+  Protocol Downgrade Attacks", <https://www.rfc-editor.org/rfc/rfc7507>). The range is
+  configuration; if a deployment needs TLS 1.2, it says so.
+- Relates: TD-14 (config surface gaps generally).
